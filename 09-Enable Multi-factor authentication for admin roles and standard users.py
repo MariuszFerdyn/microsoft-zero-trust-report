@@ -1,19 +1,25 @@
 import subprocess
-import sys
 
-def install_package(package):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-required_packages = ['azure-identity', 'requests']
-for package in required_packages:
-    try:
-        __import__(package.replace('-', '_'))
-    except ImportError:
-        print(f"Installing {package}...")
-        install_package(package)
-
-import requests
-from azure.identity import ClientSecretCredential
+try:
+    import requests
+    from azure.identity import ClientSecretCredential
+except ImportError:
+    # Attempt to install via conda (Anaconda/Miniconda must be available)
+    cmds = [
+        ["conda", "install", "-y", "-c", "conda-forge", "azure-identity", "requests"],
+        ["conda", "install", "-y", "azure-identity", "requests"],
+    ]
+    for cmd in cmds:
+        print(f"Installing dependencies with: {' '.join(cmd)}", flush=True)
+        result = subprocess.run(cmd, check=False)
+        if result.returncode == 0:
+            break
+    else:
+        raise ImportError(
+            "conda install failed. Try: conda install -c conda-forge azure-identity requests"
+        )
+    import requests
+    from azure.identity import ClientSecretCredential
 
 # Azure Credentials
 TENANT_ID = "50ea0418-683d-4007-87fb-c13c8f6b5d0b"
@@ -47,4 +53,4 @@ if response.status_code == 200:
 else:
     NumberOfConditionalAccessPolicies = 0
 
-    print(NumberOfConditionalAccessPolicies)
+print(NumberOfConditionalAccessPolicies)
