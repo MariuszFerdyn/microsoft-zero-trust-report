@@ -1,2 +1,2 @@
 # microsoft-zero-trust-report
-Python Scripts That Display ZeroTrust Report
+Based on CIS Microsoft 365 Foundations Benchmark
