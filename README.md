@@ -5,7 +5,7 @@
 ```powershell
 .\CIS_M365_Benchmark_Full.ps1 `
     -TenantId           "425b12b1-c9cc-4a2a-98e7-0a7210548876" `
-    -AppId              "04e13598-ae12-41f1-90d5-640cf4a3970e" `
+    -AppId              "7c2ed792-2d24-4ff6-a184-5b3b0a77883e" `
     -AppSecret          "xxxx" `
     -SharePointAdminUrl "https://m365x76064521-admin.sharepoint.com" `
     -TenantDomain       "M365x76064521.onmicrosoft.com"
@@ -217,6 +217,18 @@ az ad app permission add \
     --api-permissions "$EXO_GUID=Role"
 
 az ad app permission admin-consent --id $APP_ID
+
+# IMPORTANT: admin-consent silently skips Exchange Online's appRoleAssignment.
+# You must create it directly via Graph API — otherwise the token will have no
+# 'roles' claim and EXO will return 401 Unauthorized even though the permission
+# appears in the portal.
+EXO_SP_OBJ=$(az ad sp show --id 00000002-0000-0ff1-ce00-000000000000 --query id -o tsv)
+az rest --method POST \
+    --url "https://graph.microsoft.com/v1.0/servicePrincipals/$SP_OBJ/appRoleAssignments" \
+    --headers "Content-Type=application/json" \
+    --body "{\"principalId\":\"$SP_OBJ\",\"resourceId\":\"$EXO_SP_OBJ\",\"appRoleId\":\"dc50a0fb-09a3-484d-be87-e023b12c6440\"}" \
+    --output none 2>/dev/null || true
+echo "  + Exchange.ManageAsApp appRoleAssignment created (or already existed)"
 ```
 
 Then in **Exchange Admin Center (EAC)**:  

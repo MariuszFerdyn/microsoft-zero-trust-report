@@ -373,7 +373,8 @@ $graphPerms = @(
   "SecurityEvents.Read.All",
   "IdentityRiskyUser.Read.All",
   "AccessReview.Read.All",
-  "OrgSettings-Forms.ReadWrite.All"
+  "OrgSettings-Forms.ReadWrite.All",
+  "Tenant.Read.All"                   # Graph beta fallback for Power BI checks (9.x)
 ) | Sort-Object -Unique
 
 Write-Info "Adding Microsoft Graph app roles..."
