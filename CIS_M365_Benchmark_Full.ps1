@@ -937,7 +937,14 @@ function Check-2_1_14 {
 function Check-2_1_15 {
     Invoke-Check "2.1.15 (L1)" "Ensure outbound anti-spam message limits are in place (Automated)" {
         if (-not (Assert-Exo)) { Add-Result "2.1.15" "Outbound spam limits" "WARN" "EXO not connected."; return }
-        $Policy = Get-HostedOutboundSpamFilterPolicy -Identity Default -EA Stop
+        $AllPolicies = Get-HostedOutboundSpamFilterPolicy -EA Stop
+        $Policy = $AllPolicies | Where-Object { $_.IsDefault -eq $true -or $_.Identity -eq 'Default' } | Select-Object -First 1
+        if (-not $Policy) { $Policy = $AllPolicies | Select-Object -First 1 }
+        if (-not $Policy) {
+            Write-Warn "No outbound spam filter policy found."
+            Add-Result "2.1.15" "Outbound spam limits" "WARN" "No outbound spam policy found."
+            return
+        }
         Write-Info "RecipientLimitExternalPerHour : $($Policy.RecipientLimitExternalPerHour)"
         Write-Info "RecipientLimitInternalPerHour : $($Policy.RecipientLimitInternalPerHour)"
         Write-Info "RecipientLimitPerDay          : $($Policy.RecipientLimitPerDay)"
@@ -2085,6 +2092,7 @@ function Check-8_5_9 {
 
 $Script:PBIToken = $null
 $Script:PBIChecked = $false
+$Script:PBINotProvisioned = $false
 
 function Get-PBITenantSettings {
     if (-not $Script:PBIChecked) {
@@ -2111,6 +2119,7 @@ function Get-PBITenantSettings {
             return
         } catch {
             $Script:PBIError = "PBI API: $($_.Exception.Message.Split([char]10)[0].Trim())"
+            if ($_.Exception.Message -match '404') { $Script:PBINotProvisioned = $true }
         }
 
         # Try 2: Graph beta endpoint
@@ -2147,14 +2156,20 @@ function Check-9_PBI {
                 Write-Info "  Actual errors encountered:"
                 Write-Info "    $($Script:PBIError)"
             }
-            Write-Info "  Requirements:"
-            Write-Info "    1. Power BI Service > Tenant.Read.All (Application) permission + admin consent"
-            Write-Info "    2. Microsoft Graph > Tenant.Read.All (Application) permission + admin consent (fallback)"
-            Write-Info "    3. Service principal must be assigned the 'Power BI Administrator' Entra ID role"
-            Write-Info "       Entra ID > Roles and administrators > Power BI Administrator > Add assignments"
-            Write-Info "       -> search for your App Registration name and assign it"
-            Write-Info "  Manual check: app.powerbi.com > Admin portal > Tenant settings > $SettingName"
-            Add-Result $Section $Title "WARN" "Power BI inaccessible - check Tenant.Read.All + Power BI Admin role."
+            if ($Script:PBINotProvisioned) {
+                Write-Info "  Note: API returned 404 - Power BI is not licensed/provisioned in this tenant."
+                Write-Info "  Manual check: Verify Power BI (Fabric/Pro/Premium) is part of the tenant license."
+                Add-Result $Section $Title "WARN" "Power BI not provisioned in this tenant (404 - no license)."
+            } else {
+                Write-Info "  Requirements:"
+                Write-Info "    1. Power BI Service > Tenant.Read.All (Application) permission + admin consent"
+                Write-Info "    2. Microsoft Graph > Tenant.Read.All (Application) permission + admin consent (fallback)"
+                Write-Info "    3. Service principal must be assigned the 'Power BI Administrator' Entra ID role"
+                Write-Info "       Entra ID > Roles and administrators > Power BI Administrator > Add assignments"
+                Write-Info "       -> search for your App Registration name and assign it"
+                Write-Info "  Manual check: app.powerbi.com > Admin portal > Tenant settings > $SettingName"
+                Add-Result $Section $Title "WARN" "Power BI inaccessible - check Tenant.Read.All + Power BI Admin role."
+            }
             return
         }
         # Handle both endpoint response shapes
@@ -2230,7 +2245,6 @@ function Show-Summary {
     }
     Write-Host ""
     Write-Host "  Missing App Registration permissions (from WARN results):" -ForegroundColor Yellow
-    Write-Host "    Exchange.ManageAsApp       - for app-only EXO connection" -ForegroundColor Gray
     Write-Host "    DeviceManagementConfiguration.Read.All - for Intune device settings (4.1)" -ForegroundColor Gray
     Write-Host "    DeviceManagementServiceConfig.Read.All - for Intune enrollment configs (4.2)" -ForegroundColor Gray
     Write-Host "    InformationProtectionPolicy.Read.All   - for DLP/Labels (3.x)" -ForegroundColor Gray
