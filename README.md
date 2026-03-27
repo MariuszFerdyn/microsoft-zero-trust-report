@@ -1,12 +1,52 @@
 # CIS Microsoft 365 Foundations Benchmark v6.0.1 — Audit Script
 
-## Quick Start
+## ⚡ Getting Started — Guided Setup
+
+**Easiest way: just run the permissions script in PowerShell and answer the prompts.**
+It creates the app registration, sets all permissions, handles Exchange Online registration, and offers to launch the benchmark at the end.
+
+### Prerequisites
+
+- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) installed and on PATH
+- PowerShell 5.1+
+- ExchangeOnlineManagement module: `Install-Module ExchangeOnlineManagement -Scope CurrentUser`
+
+### Steps
+
+```powershell
+# Step 1 — Authenticate with Azure CLI for your tenant
+az login --tenant "<your-tenant-id>"
+
+# Step 2 — Run the interactive permissions setup (answer each prompt)
+.\CIS_M365_Permissions.ps1 `
+    -TenantId           "<your-tenant-id>" `
+    -TenantDomain       "<your-tenant>.onmicrosoft.com" `
+    -SharePointAdminUrl "https://<your-tenant>-admin.sharepoint.com" `
+    -IncludeExchange `
+    -AssignDirectoryRoles
+```
+
+The script will:
+
+1. Create (or reuse) the **Entra ID app registration**
+2. Add all **Microsoft Graph**, **Power BI Service** and **Exchange Online** application permissions
+3. Grant **admin consent** for all permissions
+4. Create the **Exchange.ManageAsApp** appRoleAssignment directly (admin-consent silently skips it)
+5. Register the SP in **Exchange Online** via `New-ServicePrincipal` + add to `View-Only Organization Management`
+6. Assign **Fabric Administrator** and **Intune Administrator** directory roles
+7. Print the complete benchmark run command and offer to **launch it immediately**
+
+> **No manual Azure Portal or Exchange Admin Center steps required.**
+
+---
+
+## Quick Start (benchmark only — if app already configured)
 
 ```powershell
 .\CIS_M365_Benchmark_Full.ps1 `
     -TenantId           "425b12b1-c9cc-4a2a-98e7-0a7210548876" `
-    -AppId              "7c2ed792-2d24-4ff6-a184-5b3b0a77883e" `
-    -AppSecret          "xxxx" `
+    -AppId              "5bd18c15-b1ab-4516-be98-85a238650d41" `
+    -AppSecret          "-QA8Q~3VV0ahStbjqO3gBwMqVhK5P.tMCeX2HcWB" `
     -SharePointAdminUrl "https://m365x76064521-admin.sharepoint.com" `
     -TenantDomain       "M365x76064521.onmicrosoft.com"
 ```
@@ -89,13 +129,22 @@ If you enabled **Exchange Online app-only** (`Exchange.ManageAsApp`), also run t
 Import-Module ExchangeOnlineManagement
 Connect-ExchangeOnline -UserPrincipalName "admin@yourtenant.com"
 
-$AppId = "<your app registration AppId (clientId)>"
-$sp = Get-ServicePrincipal -Identity $AppId
+$AppId      = "<your app registration AppId (clientId)>"
+$SpObjectId = "<your app's Azure AD service principal ObjectId>"   # az ad sp show --id $AppId --query id -o tsv
 
-Add-RoleGroupMember -Identity "View-Only Organization Management" -Member $sp.ObjectId
+# STEP 1: Register the app's SP inside Exchange Online's directory.
+# This is required even if the appRoleAssignment exists in Azure AD.
+# If it already exists, this will return an error you can safely ignore.
+New-ServicePrincipal -AppId $AppId -ObjectId $SpObjectId -DisplayName "CIS-M365-Benchmark-Audit" -ErrorAction SilentlyContinue
+
+# STEP 2: Add the SP to the View-Only Organization Management role group.
+# Use ObjectId (not AppId) - Get-ServicePrincipal does NOT support -AppId in recent EXO module versions.
+Add-RoleGroupMember -Identity "View-Only Organization Management" -Member $SpObjectId
 
 Disconnect-ExchangeOnline -Confirm:$false
 ```
+
+> **Note:** Both steps are required. The `appRoleAssignment` (`Exchange.ManageAsApp`) in Azure AD grants the token claim, but `New-ServicePrincipal` registers the identity inside Exchange Online's own RBAC engine. Without it, `Connect-ExchangeOnline -AccessToken` fails with "role assigned to application isn't supported."
 
 Copy the output values directly into the script parameters.
 
@@ -241,14 +290,20 @@ Then in **Exchange Admin Center (EAC)**:
 Import-Module ExchangeOnlineManagement
 Connect-ExchangeOnline -UserPrincipalName "admin@yourtenant.com"
 
-$AppId = "<your app registration AppId (clientId)>"
-$sp = Get-ServicePrincipal -Identity $AppId
+$AppId      = "<your app registration AppId (clientId)>"
+$SpObjectId = "<your app's Azure AD service principal ObjectId>"   # az ad sp show --id $AppId --query id -o tsv
 
-# Add the app/service principal to the built-in role group
-Add-RoleGroupMember -Identity "View-Only Organization Management" -Member $sp.ObjectId
+# STEP 1: Register the app's SP inside Exchange Online's own directory (required once).
+# Safe to run again - will error silently if already exists.
+New-ServicePrincipal -AppId $AppId -ObjectId $SpObjectId -DisplayName "CIS-M365-Benchmark-Audit" -ErrorAction SilentlyContinue
+
+# STEP 2: Add the SP to the role group.
+Add-RoleGroupMember -Identity "View-Only Organization Management" -Member $SpObjectId
 
 Disconnect-ExchangeOnline -Confirm:$false
 ```
+
+> **Why `New-ServicePrincipal` is required:** The `appRoleAssignment` in Azure AD grants the `Exchange.ManageAsApp` token claim. But Exchange Online maintains its *own* internal RBAC directory. Without registering the SP there via `New-ServicePrincipal`, `Connect-ExchangeOnline -AccessToken` fails with "role assigned to application isn't supported in this scenario."
 
 ---
 

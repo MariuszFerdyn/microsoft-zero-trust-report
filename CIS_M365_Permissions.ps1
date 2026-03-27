@@ -62,6 +62,21 @@ param(
   [Parameter(Mandatory = $false)]
   [switch]$AutoLogin,
 
+  # UPN of an Exchange admin — used to connect and run New-ServicePrincipal + Add-RoleGroupMember.
+  # Required when -IncludeExchange is set and you want fully automated EXO app-only setup.
+  [Parameter(Mandatory = $false)]
+  [string]$ExchangeAdminUPN,
+
+  # Primary domain of the tenant (e.g. contoso.onmicrosoft.com).
+  # Used to generate the benchmark run command shown at the end.
+  [Parameter(Mandatory = $false)]
+  [string]$TenantDomain,
+
+  # SharePoint admin URL (e.g. https://contoso-admin.sharepoint.com).
+  # Used to generate the benchmark run command shown at the end.
+  [Parameter(Mandatory = $false)]
+  [string]$SharePointAdminUrl,
+
   [Parameter(Mandatory = $false)]
   [string]$OutputPath = ".\CIS_M365_Permissions_Output.json"
 )
@@ -158,7 +173,11 @@ function Invoke-Az {
   }
 
   if ($ExpectJson) {
-    $text = ($output | Out-String).Trim()
+    # On Windows PowerShell, 2>&1 captures stderr lines as ErrorRecord objects
+    # mixed in with stdout strings. Filter to [string] only so that az.cmd
+    # warnings/notices don't corrupt the JSON payload before parsing.
+    $textLines = $output | Where-Object { $_ -is [string] }
+    $text = ($textLines | Out-String).Trim()
     if ([string]::IsNullOrWhiteSpace($text)) { return $null }
     return $text | ConvertFrom-Json
   }
@@ -213,7 +232,9 @@ function Invoke-AzRestJson {
     throw "az rest failed ($exit): $Method $Url`n$raw"
   }
 
-  $text = ($output | Out-String).Trim()
+  # Same filter: strip ErrorRecord objects (stderr warnings) before JSON parsing
+  $textLines = $output | Where-Object { $_ -is [string] }
+  $text = ($textLines | Out-String).Trim()
   if ([string]::IsNullOrWhiteSpace($text)) { return $null }
   return $text | ConvertFrom-Json
 }
@@ -437,6 +458,74 @@ if ($IncludeExchange) {
 
 Wait-Step
 
+if ($IncludeExchange) {
+  Write-Section "Register SP in Exchange Online (New-ServicePrincipal + role group)"
+
+  # Two steps are BOTH required for app-only EXO access:
+  #   1. New-ServicePrincipal  — registers the app SP inside Exchange Online's own RBAC directory.
+  #      Without this, Connect-ExchangeOnline -AccessToken fails even if the Entra
+  #      appRoleAssignment (Exchange.ManageAsApp) already exists.
+  #   2. Add-RoleGroupMember   — grants the SP the read permissions it needs for audit checks.
+
+  $exoUpn = $ExchangeAdminUPN
+  if (-not $exoUpn -and -not $NoPause) {
+    $exoUpn = Read-Host "  Exchange admin UPN (e.g. admin@tenant.com)  [blank = skip this step]"
+  }
+
+  if ($exoUpn) {
+    try {
+      Ensure-Module "ExchangeOnlineManagement"
+      Write-Info "Connecting to Exchange Online as $exoUpn ..."
+      Connect-ExchangeOnline -UserPrincipalName $exoUpn -ShowBanner:$false -ErrorAction Stop
+
+      Write-Info "Running New-ServicePrincipal ..."
+      try {
+        New-ServicePrincipal -AppId $AppId -ObjectId $spObjId -DisplayName $AppName -ErrorAction Stop | Out-Null
+        Write-Ok "Registered SP in Exchange Online directory"
+      } catch {
+        $msg = $_.Exception.Message
+        if ($msg -match "already exist" -or $msg -match "already registered") {
+          Write-Ok "SP already registered in Exchange Online (OK)"
+        } else {
+          Write-Warn "New-ServicePrincipal: $msg"
+        }
+      }
+
+      Write-Info "Running Add-RoleGroupMember ..."
+      try {
+        Add-RoleGroupMember -Identity "View-Only Organization Management" -Member $spObjId -ErrorAction Stop
+        Write-Ok "Added SP to 'View-Only Organization Management'"
+      } catch {
+        $msg = $_.Exception.Message
+        if ($msg -match "already a member") {
+          Write-Ok "SP already in 'View-Only Organization Management' (OK)"
+        } else {
+          Write-Warn "Add-RoleGroupMember: $msg"
+        }
+      }
+
+      Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+      Write-Ok "Exchange Online disconnected"
+    } catch {
+      Write-Warn "Exchange Online setup failed: $($_.Exception.Message)"
+      Write-Info "Run manually as Exchange admin:"
+      Write-Info "  Connect-ExchangeOnline -UserPrincipalName admin@yourtenant.com"
+      Write-Info "  New-ServicePrincipal -AppId '$AppId' -ObjectId '$spObjId' -DisplayName '$AppName'"
+      Write-Info "  Add-RoleGroupMember -Identity 'View-Only Organization Management' -Member '$spObjId'"
+      Write-Info "  Disconnect-ExchangeOnline -Confirm:`$false"
+    }
+  } else {
+    Write-Warn "ExchangeAdminUPN not supplied — skipping EXO registration."
+    Write-Info "Run manually as Exchange admin:"
+    Write-Info "  Connect-ExchangeOnline -UserPrincipalName admin@yourtenant.com"
+    Write-Info "  New-ServicePrincipal -AppId '$AppId' -ObjectId '$spObjId' -DisplayName '$AppName'"
+    Write-Info "  Add-RoleGroupMember -Identity 'View-Only Organization Management' -Member '$spObjId'"
+    Write-Info "  Disconnect-ExchangeOnline -Confirm:`$false"
+  }
+
+  Wait-Step
+}
+
 if ($AssignDirectoryRoles) {
   Write-Section "Assign Entra directory roles (optional)"
 
@@ -514,24 +603,55 @@ if ($AssignDirectoryRoles) {
   Wait-Step
 }
 
+# Resolve display values for the benchmark run command
+$domain        = if ($TenantDomain)       { $TenantDomain }       else { "<your-tenant>.onmicrosoft.com" }
+$spoUrl        = if ($SharePointAdminUrl) { $SharePointAdminUrl } else { "https://<your-tenant>-admin.sharepoint.com" }
+$secretDisplay = if ($secret)             { $secret }             else { "<your-client-secret>" }
+
 Write-Section "Output"
 $result = [ordered]@{
-  TenantId = $TenantId
-  AppName = $AppName
-  AppId = $AppId
+  TenantId                 = $TenantId
+  TenantDomain             = $domain
+  AppName                  = $AppName
+  AppId                    = $AppId
   ServicePrincipalObjectId = $spObjId
-  ClientSecret = $secret
-  IncludeExchange = [bool]$IncludeExchange
-  AssignedDirectoryRoles = [bool]$AssignDirectoryRoles
-  GeneratedAt = (Get-Date).ToString('o')
+  ClientSecret             = $secret
+  SharePointAdminUrl       = $spoUrl
+  IncludeExchange          = [bool]$IncludeExchange
+  AssignedDirectoryRoles   = [bool]$AssignDirectoryRoles
+  GeneratedAt              = (Get-Date).ToString('o')
 }
 
 ($result | ConvertTo-Json -Depth 5) | Set-Content -Path $OutputPath -Encoding UTF8
 Write-Ok "Wrote: $OutputPath"
 
-Write-Host "" 
-Write-Host "Next:" -ForegroundColor Cyan
-Write-Host "  - Use AppId / ClientSecret in CIS_M365_Benchmark_Full.ps1 parameters" -ForegroundColor DarkGray
-if ($IncludeExchange) {
-  Write-Host "  - For Exchange app-only: add the SP to 'View-Only Organization Management' in EAC (or use ExchangeOnlineManagement PowerShell)" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  +-----------------------------------------------------------------+" -ForegroundColor Cyan
+Write-Host "  |  Run the benchmark with:                                        |" -ForegroundColor Cyan
+Write-Host "  +-----------------------------------------------------------------+" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  .\CIS_M365_Benchmark_Full.ps1 ``" -ForegroundColor White
+Write-Host "    -TenantId           `"$TenantId`" ``" -ForegroundColor White
+Write-Host "    -AppId              `"$AppId`" ``" -ForegroundColor White
+Write-Host "    -AppSecret          `"$secretDisplay`" ``" -ForegroundColor White
+Write-Host "    -TenantDomain       `"$domain`" ``" -ForegroundColor White
+Write-Host "    -SharePointAdminUrl `"$spoUrl`"" -ForegroundColor White
+Write-Host ""
+
+if (-not $NoPause) {
+  $runNow = Read-Host "  Run benchmark now? [Y/N]"
+  if ($runNow -match '^[Yy]') {
+    $benchmarkPath = Join-Path $PSScriptRoot "CIS_M365_Benchmark_Full.ps1"
+    if (Test-Path $benchmarkPath) {
+      & $benchmarkPath `
+        -TenantId           $TenantId `
+        -AppId              $AppId `
+        -AppSecret          $secretDisplay `
+        -TenantDomain       $domain `
+        -SharePointAdminUrl $spoUrl
+    } else {
+      Write-Warn "CIS_M365_Benchmark_Full.ps1 not found at: $benchmarkPath"
+      Write-Info "Make sure both scripts are in the same directory."
+    }
+  }
 }

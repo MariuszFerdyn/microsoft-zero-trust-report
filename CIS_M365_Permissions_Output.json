@@ -1,0 +1,10 @@
+﻿{
+    "TenantId":  "425b12b1-c9cc-4a2a-98e7-0a7210548876",
+    "AppName":  "CIS-M365-Benchmark-Audit",
+    "AppId":  "5bd18c15-b1ab-4516-be98-85a238650d41",
+    "ServicePrincipalObjectId":  "0291b483-f68f-41be-ae3e-b65a58c2629f",
+    "ClientSecret":  "az.cmd : WARNING: The output includes credentials that you must protect. Be sure that you do not include these credentials in your \r\ncode or check the credentials into your source control. For more information, see https://aka.ms/azadsp-cli\r\nAt D:\\GIT\\microsoft-zero-trust-report\\CIS_M365_Permissions.ps1:146 char:15\r\n+     $output = \u0026 az @AzArgs 2\u003e\u00261\r\n+               ~~~~~~~~~~~~~~~~~\r\n    + CategoryInfo          : NotSpecified: (WARNING: The ou...a.ms/azadsp-cli:String) [], RemoteException\r\n    + FullyQualifiedErrorId : NativeCommandError\r\n \r\n-QA8Q~3VV0ahStbjqO3gBwMqVhK5P.tMCeX2HcWB",
+    "IncludeExchange":  true,
+    "AssignedDirectoryRoles":  true,
+    "GeneratedAt":  "2026-03-27T18:00:00.9331087+01:00"
+}

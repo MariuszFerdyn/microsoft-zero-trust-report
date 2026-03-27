@@ -59,8 +59,8 @@
 
 param(
     [string]$TenantId           = "425b12b1-c9cc-4a2a-98e7-0a7210548876",
-    [string]$AppId              = "40bfdd5c-7809-4a38-a809-e2186304c93f",
-    [string]$AppSecret          = "OBk8Q~klPctM~trhnbKySUIEHut2xdqf6FQ5Oa2Y",
+    [string]$AppId              = "5bd18c15-b1ab-4516-be98-85a238650d41",
+    [string]$AppSecret          = "-QA8Q~3VV0ahStbjqO3gBwMqVhK5P.tMCeX2HcWB",
     [string]$SharePointAdminUrl = "https://m365x76064521-admin.sharepoint.com",
     [string]$TenantDomain       = "M365x76064521.onmicrosoft.com",
     # Set to skip EXO/SPO/Teams interactive prompts
