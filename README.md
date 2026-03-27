@@ -38,7 +38,63 @@ az login --scope "74658136-14ec-4630-ad9b-26e160ff0fc6/.default"
 ### One-liner — Create App + Secret + All Permissions (resolves GUIDs dynamically)
 
 ```bash
-APP_NAME="CIS-M365-Benchmark-Audit" && APP=$(az ad app create --display-name "$APP_NAME" --query "{appId:appId,id:id}" -o json) && APP_ID=$(echo $APP | python -c "import sys,json;print(json.load(sys.stdin)['appId'])") && SP_OBJ=$(az ad sp create --id $APP_ID --query id -o tsv) && SECRET=$(az ad app credential reset --id $APP_ID --display-name "CISAuditSecret" --years 1 --query password -o tsv) && GRAPH_OBJ=$(az ad sp show --id 00000003-0000-0000-c000-000000000000 --query "appRoles" -o json) && for PERM in "Policy.Read.All" "AuditLog.Read.All" "Directory.Read.All" "Domain.Read.All" "Group.Read.All" "User.Read.All" "Organization.Read.All" "RoleManagement.Read.All" "DeviceManagementConfiguration.Read.All" "PrivilegedAccess.Read.AzureAD" "InformationProtectionPolicy.Read.All" "SecurityEvents.Read.All" "IdentityRiskyUser.Read.All" "AccessReview.Read.All" "RoleManagement.Read.Directory" "Tenant.Read.All" "OrgSettings-Forms.ReadWrite.All" "Domain.Read.All" "SecurityEvents.Read.All" "IdentityRiskyUser.Read.All"; do GUID=$(echo $GRAPH_OBJ | python -c "import sys,json;roles=json.load(sys.stdin);match=[r['id'] for r in roles if r['value']=='$PERM'];print(match[0] if match else 'NOT_FOUND')"); if [ "$GUID" != "NOT_FOUND" ]; then az ad app permission add --id $APP_ID --api 00000003-0000-0000-c000-000000000000 --api-permissions "$GUID=Role" 2>/dev/null && echo "  + $PERM ($GUID)"; else echo "  ! $PERM NOT FOUND"; fi; done && az ad app permission admin-consent --id $APP_ID && echo "" && echo "=== Done ===" && echo "TenantId:           $(az account show --query tenantId -o tsv)" && echo "AppId:              $APP_ID" && echo "AppSecret:          $SECRET" && echo "ObjectId (SP):      $SP_OBJ"
+APP_NAME="CIS-M365-Benchmark-Audit" && APP=$(az ad app create --display-name "$APP_NAME" --query "{appId:appId,id:id}" -o json) && APP_ID=$(echo $APP | python -c "import sys,json;print(json.load(sys.stdin)['appId'])") && SP_OBJ=$(az ad sp create --id $APP_ID --query id -o tsv) && SECRET=$(az ad app credential reset --id $APP_ID --display-name "CISAuditSecret" --years 1 --query password -o tsv) && GRAPH_OBJ=$(az ad sp show --id 00000003-0000-0000-c000-000000000000 --query "appRoles" -o json) && for PERM in "Policy.Read.All" "Policy.Read.AuthenticationMethod" "AuditLog.Read.All" "Directory.Read.All" "Domain.Read.All" "Group.Read.All" "User.Read.All" "Organization.Read.All" "RoleManagement.Read.All" "DeviceManagementConfiguration.Read.All" "DeviceManagementServiceConfig.Read.All" "PrivilegedAccess.Read.AzureAD" "InformationProtectionPolicy.Read.All" "SecurityEvents.Read.All" "IdentityRiskyUser.Read.All" "AccessReview.Read.All" "RoleManagement.Read.Directory" "Tenant.Read.All" "OrgSettings-Forms.ReadWrite.All" "Domain.Read.All" "SecurityEvents.Read.All" "IdentityRiskyUser.Read.All"; do GUID=$(echo $GRAPH_OBJ | python -c "import sys,json;roles=json.load(sys.stdin);match=[r['id'] for r in roles if r['value']=='$PERM'];print(match[0] if match else 'NOT_FOUND')"); if [ "$GUID" != "NOT_FOUND" ]; then az ad app permission add --id $APP_ID --api 00000003-0000-0000-c000-000000000000 --api-permissions "$GUID=Role" 2>/dev/null && echo "  + $PERM ($GUID)"; else echo "  ! $PERM NOT FOUND"; fi; done && PBI_OBJ=$(az ad sp show --id 00000009-0000-0000-c000-000000000000 --query "appRoles" -o json) && PBI_GUID=$(echo $PBI_OBJ | python -c "import sys,json;roles=json.load(sys.stdin);match=[r['id'] for r in roles if r.get('value')=='Tenant.Read.All'];print(match[0] if match else 'NOT_FOUND')") && if [ "$PBI_GUID" != "NOT_FOUND" ]; then az ad app permission add --id $APP_ID --api 00000009-0000-0000-c000-000000000000 --api-permissions "$PBI_GUID=Role" 2>/dev/null && echo "  + PowerBI Tenant.Read.All ($PBI_GUID)"; else echo "  ! PowerBI Tenant.Read.All NOT FOUND"; fi && az ad app permission admin-consent --id $APP_ID && echo "" && echo "=== Done ===" && echo "TenantId:           $(az account show --query tenantId -o tsv)" && echo "AppId:              $APP_ID" && echo "AppSecret:          $SECRET" && echo "ObjectId (SP):      $SP_OBJ"
+```
+
+#### One-liner (optional) — Same as above + Exchange Online app-only (`Exchange.ManageAsApp`)
+
+Use this if you want the script to attempt **unattended Exchange Online** (no device-code prompt). You still must assign the app in **Exchange Admin Center** to the `View-Only Organization Management` role (see the Exchange section below).
+
+```bash
+APP_NAME="CIS-M365-Benchmark-Audit" && APP=$(az ad app create --display-name "$APP_NAME" --query "{appId:appId,id:id}" -o json) && APP_ID=$(echo $APP | python -c "import sys,json;print(json.load(sys.stdin)['appId'])") && SP_OBJ=$(az ad sp create --id $APP_ID --query id -o tsv) && SECRET=$(az ad app credential reset --id $APP_ID --display-name "CISAuditSecret" --years 1 --query password -o tsv) && GRAPH_OBJ=$(az ad sp show --id 00000003-0000-0000-c000-000000000000 --query "appRoles" -o json) && for PERM in "Policy.Read.All" "Policy.Read.AuthenticationMethod" "AuditLog.Read.All" "Directory.Read.All" "Domain.Read.All" "Group.Read.All" "User.Read.All" "Organization.Read.All" "RoleManagement.Read.All" "DeviceManagementConfiguration.Read.All" "DeviceManagementServiceConfig.Read.All" "PrivilegedAccess.Read.AzureAD" "InformationProtectionPolicy.Read.All" "SecurityEvents.Read.All" "IdentityRiskyUser.Read.All" "AccessReview.Read.All" "RoleManagement.Read.Directory" "Tenant.Read.All" "OrgSettings-Forms.ReadWrite.All" "Domain.Read.All" "SecurityEvents.Read.All" "IdentityRiskyUser.Read.All"; do GUID=$(echo $GRAPH_OBJ | python -c "import sys,json;roles=json.load(sys.stdin);match=[r['id'] for r in roles if r['value']=='$PERM'];print(match[0] if match else 'NOT_FOUND')"); if [ "$GUID" != "NOT_FOUND" ]; then az ad app permission add --id $APP_ID --api 00000003-0000-0000-c000-000000000000 --api-permissions "$GUID=Role" 2>/dev/null && echo "  + $PERM ($GUID)"; else echo "  ! $PERM NOT FOUND"; fi; done && PBI_OBJ=$(az ad sp show --id 00000009-0000-0000-c000-000000000000 --query "appRoles" -o json) && PBI_GUID=$(echo $PBI_OBJ | python -c "import sys,json;roles=json.load(sys.stdin);match=[r['id'] for r in roles if r.get('value')=='Tenant.Read.All'];print(match[0] if match else 'NOT_FOUND')") && if [ "$PBI_GUID" != "NOT_FOUND" ]; then az ad app permission add --id $APP_ID --api 00000009-0000-0000-c000-000000000000 --api-permissions "$PBI_GUID=Role" 2>/dev/null && echo "  + PowerBI Tenant.Read.All ($PBI_GUID)"; else echo "  ! PowerBI Tenant.Read.All NOT FOUND"; fi && EXO_OBJ=$(az ad sp show --id 00000002-0000-0ff1-ce00-000000000000 --query "appRoles" -o json) && EXO_GUID=$(echo $EXO_OBJ | python -c "import sys,json;roles=json.load(sys.stdin);match=[r['id'] for r in roles if r.get('value')=='Exchange.ManageAsApp'];print(match[0] if match else 'NOT_FOUND')") && if [ "$EXO_GUID" != "NOT_FOUND" ]; then az ad app permission add --id $APP_ID --api 00000002-0000-0ff1-ce00-000000000000 --api-permissions "$EXO_GUID=Role" 2>/dev/null && echo "  + EXO Exchange.ManageAsApp ($EXO_GUID)"; else echo "  ! EXO Exchange.ManageAsApp NOT FOUND"; fi && az ad app permission admin-consent --id $APP_ID && echo "" && echo "=== Done ===" && echo "TenantId:           $(az account show --query tenantId -o tsv)" && echo "AppId:              $APP_ID" && echo "AppSecret:          $SECRET" && echo "ObjectId (SP):      $SP_OBJ"
+```
+
+#### One-liner (optional) — Assign Entra admin roles to the Service Principal (Power BI + Intune)
+
+Some checks still require Entra **directory roles** on the service principal (this is separate from API permissions). Run this after creating the app.
+
+Prereq: you must be signed in with an account that can assign directory roles (typically Global Admin / Privileged Role Admin).
+
+Note: the **Power BI admin** role name can vary by tenant. In some tenants it appears as **Power BI Administrator**, in others **Power BI Service Administrator** (and in newer tenants you may see **Fabric Administrator** instead). The snippet below tries common names and prints what it finds.
+
+```bash
+# Replace with the Service Principal ObjectId that the earlier one-liner prints (SP_OBJ)
+SP_OBJ="<service principal objectId>" \
+&& PBI_ROLE=$(az rest --method GET --url "https://graph.microsoft.com/v1.0/directoryRoleTemplates?$select=id,displayName" --query "value[?displayName=='Power BI Administrator'].displayName | [0]" -o tsv) \
+&& if [ -z "$PBI_ROLE" ]; then PBI_ROLE=$(az rest --method GET --url "https://graph.microsoft.com/v1.0/directoryRoleTemplates?$select=id,displayName" --query "value[?displayName=='Power BI Service Administrator'].displayName | [0]" -o tsv); fi \
+&& if [ -z "$PBI_ROLE" ]; then PBI_ROLE=$(az rest --method GET --url "https://graph.microsoft.com/v1.0/directoryRoleTemplates?$select=id,displayName" --query "value[?displayName=='Fabric Administrator'].displayName | [0]" -o tsv); fi \
+&& if [ -z "$PBI_ROLE" ]; then echo "  ! Could not find a Power BI admin role template in this tenant."; echo "  i Available templates containing 'Power BI' or 'Fabric':"; az rest --method GET --url "https://graph.microsoft.com/v1.0/directoryRoleTemplates?$select=displayName" --query "value[?contains(displayName,'Power BI') || contains(displayName,'Fabric')].displayName" -o tsv; exit 1; fi \
+&& for ROLE in "$PBI_ROLE" "Intune Administrator"; do \
+    TEMPLATE_ID=$(az rest --method GET --url "https://graph.microsoft.com/v1.0/directoryRoleTemplates?$select=id,displayName" --query "value[?displayName=='$ROLE'].id | [0]" -o tsv); \
+    if [ -z "$TEMPLATE_ID" ]; then echo "  ! Role template not found: $ROLE"; continue; fi; \
+    ROLE_ID=$(az rest --method GET --url "https://graph.microsoft.com/v1.0/directoryRoles?$select=id,roleTemplateId" --query "value[?roleTemplateId=='$TEMPLATE_ID'].id | [0]" -o tsv); \
+    if [ -z "$ROLE_ID" ]; then ROLE_ID=$(az rest --method POST --url "https://graph.microsoft.com/v1.0/directoryRoles" --headers "Content-Type=application/json" --body "{\"roleTemplateId\":\"$TEMPLATE_ID\"}" --query id -o tsv); fi; \
+    if [ -z "$ROLE_ID" ]; then echo "  ! Failed to activate role: $ROLE"; continue; fi; \
+    az rest --method POST --url "https://graph.microsoft.com/v1.0/directoryRoles/$ROLE_ID/members/\$ref" --headers "Content-Type=application/json" --body "{\"@odata.id\":\"https://graph.microsoft.com/v1.0/directoryObjects/$SP_OBJ\"}" >/dev/null \
+        && echo "  + Assigned: $ROLE" \
+        || echo "  ! Failed to assign: $ROLE"; \
+done
+```
+
+Quick discovery (optional): list role templates containing “Power BI” / “Fabric”:
+
+```bash
+az rest --method GET --url "https://graph.microsoft.com/v1.0/directoryRoleTemplates?$select=displayName" --query "value[?contains(displayName,'Power BI') || contains(displayName,'Fabric')].displayName" -o table
+```
+
+If you enabled **Exchange Online app-only** (`Exchange.ManageAsApp`), also run the **PowerShell block below** to add the app/service principal to the Exchange role group `View-Only Organization Management`.
+
+```powershell
+# Run as an Exchange admin
+Import-Module ExchangeOnlineManagement
+Connect-ExchangeOnline -UserPrincipalName "admin@yourtenant.com"
+
+$AppId = "<your app registration AppId (clientId)>"
+$sp = Get-ServicePrincipal -Identity $AppId
+
+Add-RoleGroupMember -Identity "View-Only Organization Management" -Member $sp.ObjectId
+
+Disconnect-ExchangeOnline -Confirm:$false
 ```
 
 Copy the output values directly into the script parameters.
@@ -71,6 +127,7 @@ GRAPH_OBJ=$(az ad sp show --id 00000003-0000-0000-c000-000000000000 --query "app
 
 PERMISSIONS=(
     "Policy.Read.All"
+    "Policy.Read.AuthenticationMethod"     # Authentication Methods policy (5.2.x)
     "AuditLog.Read.All"
     "Directory.Read.All"
     "Domain.Read.All"
@@ -79,13 +136,14 @@ PERMISSIONS=(
     "Organization.Read.All"
     "RoleManagement.Read.All"
     "RoleManagement.Read.Directory"          # PIM role schedules
-    "DeviceManagementConfiguration.Read.All" # Intune checks (4.x)
+    "DeviceManagementConfiguration.Read.All" # Intune device settings (4.1)
+    "DeviceManagementServiceConfig.Read.All" # Intune enrollment configurations (4.2)
     "PrivilegedAccess.Read.AzureAD"          # PIM management (5.3.1)
     "InformationProtectionPolicy.Read.All"   # DLP / sensitivity labels (3.x)
     "SecurityEvents.Read.All"
     "IdentityRiskyUser.Read.All"
     "AccessReview.Read.All"                  # Access reviews (5.3.3)
-    "Tenant.Read.All"                        # Power BI via Graph beta (9.x)
+    "Tenant.Read.All"                        # Power BI checks via Graph beta fallback (9.x)
     "OrgSettings-Forms.ReadWrite.All"        # Forms phishing protection (1.3.5)
     "Domain.Read.All"                        # SPF/DMARC domain checks (2.1.x)
     "SecurityEvents.Read.All"
@@ -109,6 +167,25 @@ print(match[0] if match else 'NOT_FOUND')
         echo "  ! $PERM — not found in Graph SP"
     fi
 done
+
+# Power BI Service app role (required for Section 9 Power BI REST API access)
+PBI_OBJ=$(az ad sp show --id 00000009-0000-0000-c000-000000000000 --query "appRoles" -o json)
+PBI_GUID=$(echo $PBI_OBJ | python -c "
+import sys, json
+roles = json.load(sys.stdin)
+match = [r['id'] for r in roles if r.get('value') == 'Tenant.Read.All']
+print(match[0] if match else 'NOT_FOUND')
+")
+echo "Power BI Service Tenant.Read.All GUID: $PBI_GUID"
+
+if [ "$PBI_GUID" != "NOT_FOUND" ]; then
+    az ad app permission add \
+        --id $APP_ID \
+        --api 00000009-0000-0000-c000-000000000000 \
+        --api-permissions "$PBI_GUID=Role"
+else
+    echo "  ! Power BI Service Tenant.Read.All not found"
+fi
 ```
 
 #### 4. Grant Admin Consent
@@ -145,34 +222,55 @@ az ad app permission admin-consent --id $APP_ID
 Then in **Exchange Admin Center (EAC)**:  
 `Roles → Admin roles → View-Only Organization Management → Members → Add → search for "CIS-M365-Benchmark-Audit"`
 
+**PowerShell equivalent (does the same as the EAC step):**
+
+```powershell
+# Run as an Exchange admin
+Import-Module ExchangeOnlineManagement
+Connect-ExchangeOnline -UserPrincipalName "admin@yourtenant.com"
+
+$AppId = "<your app registration AppId (clientId)>"
+$sp = Get-ServicePrincipal -Identity $AppId
+
+# Add the app/service principal to the built-in role group
+Add-RoleGroupMember -Identity "View-Only Organization Management" -Member $sp.ObjectId
+
+Disconnect-ExchangeOnline -Confirm:$false
+```
+
 ---
 
 ### Power BI — Add Tenant.Read.All Permission
 
 Required for all Section 9 (Power BI) checks.  
-This is a **Microsoft Graph** permission (not Power BI Service) — the script uses the Graph beta endpoint `/admin/powerbi/tenantsettings`.
+Section 9 attempts the **Power BI REST API** first, then falls back to **Microsoft Graph beta**.
+
+- **Power BI REST API** requires **Power BI Service** → `Tenant.Read.All` (Application) + admin consent.
+- **Graph beta fallback** requires **Microsoft Graph** → `Tenant.Read.All` (Application) + admin consent (the one-liner above already includes this).
 
 ```bash
-# Resolve Microsoft Graph Tenant.Read.All GUID dynamically
-GRAPH_OBJ=$(az ad sp show --id 00000003-0000-0000-c000-000000000000 --query "appRoles" -o json)
-TENANT_GUID=$(echo $GRAPH_OBJ | python -c "
+# Resolve Power BI Service Tenant.Read.All GUID dynamically
+PBI_OBJ=$(az ad sp show --id 00000009-0000-0000-c000-000000000000 --query "appRoles" -o json)
+TENANT_GUID=$(echo $PBI_OBJ | python -c "
 import sys, json
 roles = json.load(sys.stdin)
 match = [r['id'] for r in roles if r['value'] == 'Tenant.Read.All']
 print(match[0] if match else 'NOT_FOUND')
 ")
-echo "Microsoft Graph Tenant.Read.All GUID: $TENANT_GUID"
+echo "Power BI Service Tenant.Read.All GUID: $TENANT_GUID"
 
 az ad app permission add \
     --id $APP_ID \
-    --api 00000003-0000-0000-c000-000000000000 \
+    --api 00000009-0000-0000-c000-000000000000 \
     --api-permissions "$TENANT_GUID=Role"
 
 az ad app permission admin-consent --id $APP_ID
 ```
 
-> **Portal equivalent:** App Registrations → CIS-M365-Benchmark-Audit → API Permissions  
-> → Add a permission → Microsoft Graph → Application permissions → search **Tenant.Read.All** → Add → Grant admin consent
+> **Portal equivalent:** App Registrations → CIS-M365-Benchmark-Audit → API Permissions
+> - Add a permission → APIs my organization uses → **Power BI Service** → Application permissions → **Tenant.Read.All** → Add
+> - (Optional but recommended) Add a permission → Microsoft Graph → Application permissions → **Tenant.Read.All** → Add
+> - Grant admin consent
 
 ---
 

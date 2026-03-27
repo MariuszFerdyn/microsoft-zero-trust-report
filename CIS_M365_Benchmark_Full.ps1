@@ -35,9 +35,10 @@
     App Registration - Required API Permissions (Application, all require admin consent):
         Microsoft Graph:
           Directory.Read.All, Policy.Read.All, Policy.Read.AuthenticationMethod,
-          Policy.Read.DeviceConfiguration, Organization.Read.All, User.Read.All,
+                    Organization.Read.All, User.Read.All,
           Group.Read.All, RoleManagement.Read.All, RoleManagement.Read.Directory,
-          DeviceManagementConfiguration.Read.All, Application.Read.All,
+          DeviceManagementConfiguration.Read.All,
+          DeviceManagementServiceConfig.Read.All, <- Section 4.2 (Intune enrollment configurations)
           OrgSettings-Forms.ReadWrite.All,    <- Section 1.3.5 (Forms phishing protection)
           AuditLog.Read.All, Domain.Read.All,
           PrivilegedAccess.Read.AzureAD,      <- Section 5.3.x (requires Entra P2)
@@ -58,8 +59,8 @@
 
 param(
     [string]$TenantId           = "425b12b1-c9cc-4a2a-98e7-0a7210548876",
-    [string]$AppId              = "04e13598-ae12-41f1-90d5-640cf4a3970e",
-    [string]$AppSecret          = "xxx",
+    [string]$AppId              = "40bfdd5c-7809-4a38-a809-e2186304c93f",
+    [string]$AppSecret          = "OBk8Q~klPctM~trhnbKySUIEHut2xdqf6FQ5Oa2Y",
     [string]$SharePointAdminUrl = "https://m365x76064521-admin.sharepoint.com",
     [string]$TenantDomain       = "M365x76064521.onmicrosoft.com",
     # Set to skip EXO/SPO/Teams interactive prompts
@@ -70,10 +71,10 @@ param(
 # ===============================================================================
 #  RESULT TRACKING
 # ===============================================================================
-$Results               = [System.Collections.Generic.List[PSCustomObject]]::new()
 $Script:PassCount      = 0
 $Script:FailCount      = 0
 $Script:WarnCount      = 0
+$Script:Results        = [System.Collections.Generic.List[object]]::new()
 $Script:ExoConnected   = $false
 $Script:SpoConnected   = $false
 $Script:TeamsConnected = $false
@@ -142,6 +143,144 @@ function Ensure-Module {
         Install-Module $Name -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
     }
     Import-Module $Name -ErrorAction Stop -WarningAction SilentlyContinue
+}
+
+# Back-compat alias (older revisions used this name)
+function Import-RequiredModule { param([string]$Name) Ensure-Module $Name }
+
+function Get-JwtClaims {
+    param([Parameter(Mandatory=$true)][string]$Jwt)
+
+    $parts = $Jwt -split '\.'
+    if ($parts.Count -lt 2) { return $null }
+
+    $payload = $parts[1].Replace('-', '+').Replace('_', '/')
+    switch ($payload.Length % 4) {
+        2 { $payload += '==' }
+        3 { $payload += '=' }
+        default { }
+    }
+
+    try {
+        $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload))
+        return ($json | ConvertFrom-Json -ErrorAction Stop)
+    } catch {
+        return $null
+    }
+}
+
+function Get-GraphErrorDetails {
+    param([Parameter(Mandatory=$true)][System.Management.Automation.ErrorRecord]$Err)
+
+    $ex = $Err.Exception
+    $status = $null
+    $reason = $null
+    $content = $null
+
+    foreach ($prop in @('ResponseStatusCode','StatusCode')) {
+        if ($ex -and $ex.PSObject.Properties.Name -contains $prop) {
+            $status = $ex.$prop
+            break
+        }
+    }
+    if (-not $status -and $ex -and $ex.PSObject.Properties.Name -contains 'Response' -and $ex.Response) {
+        try { $status = $ex.Response.StatusCode } catch { }
+        try { $reason = $ex.Response.ReasonPhrase } catch { }
+        try {
+            if ($ex.Response.Content) {
+                $content = $ex.Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            }
+        } catch { }
+    }
+
+    if (-not $reason -and $ex -and $ex.PSObject.Properties.Name -contains 'ResponseReasonPhrase') {
+        $reason = $ex.ResponseReasonPhrase
+    }
+
+    if (-not $content -and $ex -and $ex.PSObject.Properties.Name -contains 'ResponseContent') {
+        $content = $ex.ResponseContent
+    }
+    if (-not $content -and $Err.ErrorDetails -and $Err.ErrorDetails.Message) {
+        $content = $Err.ErrorDetails.Message
+    }
+
+    $graphCode = $null
+    $graphMessage = $null
+    $requestId = $null
+    $clientRequestId = $null
+
+    if ($content) {
+        $trim = $content.Trim()
+        try {
+            $parsed = $trim | ConvertFrom-Json -ErrorAction Stop
+            if ($parsed.error) {
+                $graphCode = $parsed.error.code
+                $graphMessage = $parsed.error.message
+                if ($parsed.error.innerError) {
+                    $requestId = $parsed.error.innerError.'request-id'
+                    $clientRequestId = $parsed.error.innerError.'client-request-id'
+                }
+            }
+        } catch { }
+    }
+
+    [PSCustomObject]@{
+        Status          = $status
+        Reason          = $reason
+        GraphCode       = $graphCode
+        GraphMessage    = $graphMessage
+        RequestId       = $requestId
+        ClientRequestId = $clientRequestId
+        RawContent      = $content
+        ExceptionType   = if ($ex) { $ex.GetType().FullName } else { $null }
+        ExceptionMsg    = if ($ex) { $ex.Message } else { $null }
+    }
+}
+
+function Write-GraphErrorDetails {
+    param(
+        [Parameter(Mandatory=$true)][System.Management.Automation.ErrorRecord]$Err,
+        [string]$Prefix = "  "
+    )
+    $d = Get-GraphErrorDetails -Err $Err
+    if ($d.Status) {
+        $statusText = "$($d.Status)"
+        if ($d.Reason) { $statusText += " ($($d.Reason))" }
+        Write-Info ("{0}HTTP status: {1}" -f $Prefix, $statusText)
+    }
+    if ($d.GraphCode)    { Write-Info ("{0}Graph code: {1}" -f $Prefix, $d.GraphCode) }
+    if ($d.GraphMessage) { Write-Info ("{0}Graph message: {1}" -f $Prefix, $d.GraphMessage) }
+    if ($d.RequestId)    { Write-Info ("{0}Request-Id: {1}" -f $Prefix, $d.RequestId) }
+    if ($d.ClientRequestId) { Write-Info ("{0}Client-Request-Id: {1}" -f $Prefix, $d.ClientRequestId) }
+
+    if ($d.RawContent -and -not $d.GraphMessage) {
+        $oneLine = $d.RawContent -replace "[\r\n]+", " "
+        if ($oneLine.Length -gt 400) { $oneLine = $oneLine.Substring(0, 400) + "..." }
+        Write-Info ("{0}Response: {1}" -f $Prefix, $oneLine)
+    }
+
+    if ($d.ExceptionMsg) {
+        $msg = $d.ExceptionMsg.Split([char]10)[0].Trim()
+        Write-Info ("{0}Exception: {1}" -f $Prefix, $msg)
+    }
+}
+
+function Write-GraphTokenRoles {
+    param([string]$Prefix = "  ")
+    try {
+        $tok = Get-OAuthToken -Scope "https://graph.microsoft.com/.default"
+        $claims = Get-JwtClaims -Jwt $tok
+        if ($claims -and $claims.roles) {
+            $roles = @($claims.roles)
+            if ($roles.Count -gt 0) {
+                $preview = ($roles | Sort-Object) -join ", "
+                if ($preview.Length -gt 400) { $preview = $preview.Substring(0, 400) + "..." }
+                Write-Info ("{0}Token roles claim includes: {1}" -f $Prefix, $preview)
+            }
+        }
+    } catch {
+        # Ignore token decoding issues
+    }
 }
 
 function Get-OAuthToken {
@@ -287,7 +426,6 @@ function Assert-Teams { if (-not $Script:TeamsConnected) { Write-Skip "Teams not
 # ===============================================================================
 #  SECTION 1 - Microsoft 365 Admin Center
 # ===============================================================================
-
 function Check-1_1_1 {
     Invoke-Check "1.1.1 (L1)" "Ensure Administrative accounts are cloud-only (Automated)" {
         $DirectoryRoles  = Get-MgDirectoryRole -All -EA Stop
@@ -403,9 +541,10 @@ function Check-1_2_1 {
     Invoke-Check "1.2.1 (L2)" "Ensure only organizationally managed/approved public groups exist (Automated)" {
         # FIX: OData filter on 'visibility' is not supported server-side; use client-side filter
         Write-Info "Retrieving all Unified (M365) groups (client-side visibility filter)..."
-        $AllGroups    = Get-MgGroup -Filter "groupTypes/any(c:c eq 'Unified')" `
+        $AllGroups    = @(Get-MgGroup -Filter "groupTypes/any(c:c eq 'Unified')" `
             -Property DisplayName,Mail,Visibility -All -EA Stop
-        $PublicGroups = $AllGroups | Where-Object { $_.Visibility -eq "Public" }
+        )
+        $PublicGroups = @($AllGroups | Where-Object { $_.Visibility -eq "Public" })
         Write-Info "Total M365 groups: $($AllGroups.Count), Public: $($PublicGroups.Count)"
         if ($PublicGroups.Count -eq 0) {
             Write-Pass "No public Microsoft 365 Groups found."
@@ -444,9 +583,9 @@ function Check-1_2_2 {
 function Check-1_3_1 {
     Invoke-Check "1.3.1 (L1)" "Ensure the Password expiration policy is set to never expire (Automated)" {
         $NeverExpire  = 2147483647
-        $NonCompliant = Get-MgDomain -EA Stop | Where-Object {
+        $NonCompliant = @(Get-MgDomain -EA Stop | Where-Object {
             $_.IsVerified -and $_.PasswordValidityPeriodInDays -ne $NeverExpire
-        }
+        })
         if ($NonCompliant.Count -eq 0) {
             Write-Pass "All verified domains have 'Never expire' password policy (value = 2147483647)."
             Add-Result "1.3.1" "Password never expire policy" "PASS" "All domains = never expire."
@@ -628,7 +767,6 @@ function Check-1_3_9 {
 # ===============================================================================
 #  SECTION 2 - Microsoft 365 Defender
 # ===============================================================================
-
 function Check-2_1_2 {
     Invoke-Check "2.1.2 (L1)" "Ensure the Common Attachment Types Filter is enabled (Automated)" {
         if (-not (Assert-Exo)) { Add-Result "2.1.2" "Common attachment filter" "WARN" "EXO not connected."; return }
@@ -823,14 +961,12 @@ function Check-2_1_15 {
 # ===============================================================================
 #  SECTION 3 - Compliance
 # ===============================================================================
-
 function Check-3_2_1 {
     Invoke-Check "3.2.1 (L1)" "Ensure DLP policies are enabled (Automated)" {
-        Write-Warn "DLP policy check requires 'InformationProtectionPolicy.Read.All' Graph permission."
-        Write-Info "  Add in Azure Portal > App Registrations > $AppId > API Permissions"
+        Write-Warn "DLP policy check is not currently automated in this script."
         Write-Info "  Manual check: Microsoft Purview > Data loss prevention > Policies"
         Write-Info "  Compliant: At least one enabled policy covering Exchange, SharePoint, OneDrive, Teams."
-        Add-Result "3.2.1" "DLP policies enabled" "WARN" "Add InformationProtectionPolicy.Read.All permission."
+        Add-Result "3.2.1" "DLP policies enabled" "WARN" "Manual verification required (Purview DLP policies not queried here)."
     }
 }
 
@@ -851,12 +987,15 @@ function Check-3_3_1 {
             }
         } catch {
             if ($_.Exception.Message -like "*Forbidden*") {
-                Write-Warn "Permission denied. Add 'InformationProtectionPolicy.Read.All' to App Registration."
+                Write-Warn "Permission denied reading sensitivity labels from Graph."
+                Write-GraphErrorDetails -Err $_
+                Write-GraphTokenRoles
+                Write-Info "  Required: Microsoft Graph Application permission 'InformationProtectionPolicy.Read.All' + admin consent"
                 Write-Info "  Manual check: Microsoft Purview > Information Protection > Labels > Label policies"
             } else {
                 Write-Warn "Error: $($_.Exception.Message)"
             }
-            Add-Result "3.3.1" "Sensitivity labels published" "WARN" "Missing InformationProtectionPolicy.Read.All."
+            Add-Result "3.3.1" "Sensitivity labels published" "WARN" "Unable to read sensitivity labels (see error details)."
         }
     }
 }
@@ -864,7 +1003,6 @@ function Check-3_3_1 {
 # ===============================================================================
 #  SECTION 4 - Intune / Device Management
 # ===============================================================================
-
 function Check-4_1 {
     Invoke-Check "4.1 (L2)" "Ensure devices without compliance policy are marked 'not compliant' (Automated)" {
         try {
@@ -882,7 +1020,8 @@ function Check-4_1 {
         } catch {
             if ($_.Exception.Message -like "*Forbidden*" -or $_.Exception.Message -like "*Authorization_RequestDenied*") {
                 Write-Warn "Permission denied accessing Intune device settings."
-                Write-Info "  Actual error: $($_.Exception.Message.Split([char]10)[0].Trim())"
+                Write-GraphErrorDetails -Err $_
+                Write-GraphTokenRoles
                 Write-Info "  Required: 'DeviceManagementConfiguration.Read.All' Graph permission (Application) + admin consent"
                 Write-Info "  Also required: Intune license on the tenant + SP assigned 'Intune Administrator' role"
                 Write-Info "    Entra ID > Roles and administrators > Intune Administrator > Add assignments"
@@ -921,11 +1060,12 @@ function Check-4_2 {
         } catch {
             if ($_.Exception.Message -like "*Forbidden*") {
                 Write-Warn "Permission denied accessing Intune enrollment configurations."
-                Write-Info "  Actual error: $($_.Exception.Message.Split([char]10)[0].Trim())"
-                Write-Info "  Required: 'DeviceManagementConfiguration.Read.All' Graph permission (Application) + admin consent"
+                Write-GraphErrorDetails -Err $_
+                Write-GraphTokenRoles
+                Write-Info "  Required: 'DeviceManagementServiceConfig.Read.All' (or 'DeviceManagementServiceConfiguration.Read.All') Graph Application permission + admin consent"
                 Write-Info "  Also required: Intune license + SP assigned 'Intune Administrator' Entra role"
             } else { throw }
-            Add-Result "4.2" "Block personal device enrollment" "WARN" "Forbidden - check DeviceManagementConfiguration.Read.All + Intune license."
+            Add-Result "4.2" "Block personal device enrollment" "WARN" "Forbidden - check DeviceManagementServiceConfig.Read.All + Intune license."
         }
     }
 }
@@ -1083,12 +1223,12 @@ function Check-5_1_4_6 {
 function Check-5_1_5_1 {
     Invoke-Check "5.1.5.1 (L1)" "Ensure user consent to apps accessing company data is not allowed (Automated)" {
         $AuthPol   = Get-MgPolicyAuthorizationPolicy -EA Stop
-        $GrantPols = $AuthPol.DefaultUserRolePermissions.PermissionGrantPoliciesAssigned
+        $GrantPols = @($AuthPol.DefaultUserRolePermissions.PermissionGrantPoliciesAssigned)
         Write-Info "PermissionGrantPoliciesAssigned:"
         $GrantPols | ForEach-Object { Write-Info "  -> $_" }
-        $Risky = $GrantPols | Where-Object {
+        $Risky = @($GrantPols | Where-Object {
             $_ -like "*microsoft-user-default-low*" -or $_ -like "*microsoft-user-default-legacy*"
-        }
+        })
         if ($Risky.Count -eq 0) {
             Write-Pass "User consent for apps is NOT allowed via default-low or legacy policies."
             Add-Result "5.1.5.1" "No user consent to apps" "PASS" "No risky consent policies."
@@ -1148,12 +1288,12 @@ function Check-5_1_6_3 {
 
 function Check-5_2_2_1 {
     Invoke-Check "5.2.2.1 (L1)" "Ensure MFA is enabled for all users in administrative roles (Automated)" {
-        $CAPolicies = Get-MgIdentityConditionalAccessPolicy -All -EA Stop
-        $AdminMFA   = $CAPolicies | Where-Object {
+        $CAPolicies = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
+        $AdminMFA   = @($CAPolicies | Where-Object {
             $_.State -eq "enabled" -and
             $_.GrantControls.BuiltInControls -contains "mfa" -and
-            $_.Conditions.Users.IncludeRoles.Count -gt 0
-        }
+            (@($_.Conditions.Users.IncludeRoles).Count -gt 0)
+        })
         if ($AdminMFA.Count -gt 0) {
             Write-Pass "$($AdminMFA.Count) CA policy/policies require MFA for admin roles."
             $AdminMFA | ForEach-Object { Write-Info "  -> $($_.DisplayName)" }
@@ -1168,12 +1308,12 @@ function Check-5_2_2_1 {
 
 function Check-5_2_2_2 {
     Invoke-Check "5.2.2.2 (L1)" "Ensure MFA is enabled for all users (Automated)" {
-        $CAPolicies = Get-MgIdentityConditionalAccessPolicy -All -EA Stop
-        $AllMFA     = $CAPolicies | Where-Object {
+        $CAPolicies = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
+        $AllMFA     = @($CAPolicies | Where-Object {
             $_.State -eq "enabled" -and
             $_.GrantControls.BuiltInControls -contains "mfa" -and
             $_.Conditions.Users.IncludeUsers -contains "All"
-        }
+        })
         if ($AllMFA.Count -gt 0) {
             Write-Pass "$($AllMFA.Count) CA policy/policies require MFA for ALL users."
             $AllMFA | ForEach-Object { Write-Info "  -> $($_.DisplayName)" }
@@ -1188,15 +1328,15 @@ function Check-5_2_2_2 {
 
 function Check-5_2_2_4 {
     Invoke-Check "5.2.2.4 (L1)" "Ensure Sign-in frequency and non-persistent browser sessions are configured (Automated)" {
-        $CAPolicies = Get-MgIdentityConditionalAccessPolicy -All -EA Stop
-        $SIF = $CAPolicies | Where-Object {
+        $CAPolicies = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
+        $SIF = @($CAPolicies | Where-Object {
             $_.State -eq "enabled" -and $_.SessionControls.SignInFrequency.IsEnabled -eq $true
-        }
-        $PB = $CAPolicies | Where-Object {
+        })
+        $PB = @($CAPolicies | Where-Object {
             $_.State -eq "enabled" -and
             $_.SessionControls.PersistentBrowser.IsEnabled -eq $true -and
             $_.SessionControls.PersistentBrowser.Mode -eq "never"
-        }
+        })
         Write-Info "Sign-in frequency policies  : $($SIF.Count)"
         Write-Info "Persistent browser=never pols: $($PB.Count)"
         if ($SIF.Count -gt 0 -and $PB.Count -gt 0) {
@@ -1214,12 +1354,12 @@ function Check-5_2_2_4 {
 
 function Check-5_2_2_5 {
     Invoke-Check "5.2.2.5 (L1)" "Ensure Phishing-resistant MFA strength is required for Administrators (Automated)" {
-        $CAPolicies = Get-MgIdentityConditionalAccessPolicy -All -EA Stop
-        $PhishPols  = $CAPolicies | Where-Object {
+        $CAPolicies = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
+        $PhishPols  = @($CAPolicies | Where-Object {
             $_.State -eq "enabled" -and
             $null -ne $_.GrantControls.AuthenticationStrength -and
-            $_.Conditions.Users.IncludeRoles.Count -gt 0
-        }
+            (@($_.Conditions.Users.IncludeRoles).Count -gt 0)
+        })
         if ($PhishPols.Count -gt 0) {
             Write-Pass "$($PhishPols.Count) CA policy/policies require authentication strength for admins."
             $PhishPols | ForEach-Object { Write-Info "  -> $($_.DisplayName)" }
@@ -1234,12 +1374,12 @@ function Check-5_2_2_5 {
 
 function Check-5_2_2_8 {
     Invoke-Check "5.2.2.8 (L2)" "Ensure sign-in risk is blocked for medium and high risk (Automated)" {
-        $CAPolicies = Get-MgIdentityConditionalAccessPolicy -All -EA Stop
-        $RiskBlock  = $CAPolicies | Where-Object {
+        $CAPolicies = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
+        $RiskBlock  = @($CAPolicies | Where-Object {
             $_.State -eq "enabled" -and
             $_.GrantControls.BuiltInControls -contains "block" -and
             ($_.Conditions.SignInRiskLevels -contains "high" -or $_.Conditions.SignInRiskLevels -contains "medium")
-        }
+        })
         if ($RiskBlock.Count -gt 0) {
             Write-Pass "$($RiskBlock.Count) CA policy/policies block medium/high risk sign-ins."
             $RiskBlock | ForEach-Object { Write-Info "  -> $($_.DisplayName): Levels=$($_.Conditions.SignInRiskLevels -join ',')" }
@@ -1255,12 +1395,12 @@ function Check-5_2_2_8 {
 
 function Check-5_2_2_9 {
     Invoke-Check "5.2.2.9 (L1)" "Ensure a managed device is required for authentication (Automated)" {
-        $CAPolicies = Get-MgIdentityConditionalAccessPolicy -All -EA Stop
-        $MgrDev     = $CAPolicies | Where-Object {
+        $CAPolicies = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
+        $MgrDev     = @($CAPolicies | Where-Object {
             $_.State -eq "enabled" -and
             ($_.GrantControls.BuiltInControls -contains "compliantDevice" -or
              $_.GrantControls.BuiltInControls -contains "domainJoinedDevice")
-        }
+        })
         if ($MgrDev.Count -gt 0) {
             Write-Pass "$($MgrDev.Count) CA policy/policies require compliant/domain-joined device."
             $MgrDev | ForEach-Object { Write-Info "  -> $($_.DisplayName)" }
@@ -1274,11 +1414,11 @@ function Check-5_2_2_9 {
 
 function Check-5_2_2_10 {
     Invoke-Check "5.2.2.10 (L1)" "Ensure managed device is required to register security information (Automated)" {
-        $CAPolicies = Get-MgIdentityConditionalAccessPolicy -All -EA Stop
-        $SecInfoPol = $CAPolicies | Where-Object {
+        $CAPolicies = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
+        $SecInfoPol = @($CAPolicies | Where-Object {
             $_.State -eq "enabled" -and
             $_.Conditions.Applications.IncludeUserActions -contains "urn:user:registersecurityinfo"
-        }
+        })
         if ($SecInfoPol.Count -gt 0) {
             Write-Pass "$($SecInfoPol.Count) CA policy/policies protect security info registration."
             $SecInfoPol | ForEach-Object { Write-Info "  -> $($_.DisplayName)" }
@@ -1294,14 +1434,14 @@ function Check-5_2_2_10 {
 function Check-5_2_2_11 {
     Invoke-Check "5.2.2.11 (L1)" "Ensure sign-in frequency for Intune Enrollment is set to 'Every time' (Automated)" {
         $IntuneAppId = "d4ebce55-015a-49b5-a083-c84d1797ae8c"
-        $CAPolicies  = Get-MgIdentityConditionalAccessPolicy -All -EA Stop
-        $IntunePol   = $CAPolicies | Where-Object {
+        $CAPolicies  = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
+        $IntunePol   = @($CAPolicies | Where-Object {
             $_.State -eq "enabled" -and
             $_.SessionControls.SignInFrequency.IsEnabled -and
             $_.SessionControls.SignInFrequency.FrequencyInterval -eq "everyTime" -and
             ($_.Conditions.Applications.IncludeApplications -contains $IntuneAppId -or
              $_.Conditions.Applications.IncludeApplications -contains "All")
-        }
+        })
         if ($IntunePol.Count -gt 0) {
             Write-Pass "Sign-in frequency for Intune Enrollment set to 'Every time'."
             $IntunePol | ForEach-Object { Write-Info "  -> $($_.DisplayName)" }
@@ -1938,7 +2078,9 @@ function Check-8_5_9 {
 # ===============================================================================
 #  SECTION 9 - Power BI
 #  FIX: Use Power BI-specific OAuth token (scope: analysis.windows.net), fall back
-#       to Graph beta endpoint. Both require 'Tenant.Read.All' on PBI Service.
+#       to Graph beta endpoint.
+#       - Power BI REST API requires 'Tenant.Read.All' on Power BI Service.
+#       - Graph beta fallback requires 'Tenant.Read.All' on Microsoft Graph.
 # ===============================================================================
 
 $Script:PBIToken = $null
@@ -1974,8 +2116,17 @@ function Get-PBITenantSettings {
         # Try 2: Graph beta endpoint
         try {
             $Response = Invoke-MgGraphRequest -Method GET `
-                -Uri "https://graph.microsoft.com/beta/admin/powerbi/tenantsettings" -EA Stop
-            $Script:PBIToken = $Response.value
+                -Uri "https://graph.microsoft.com/beta/admin/powerBI/tenantSettings" -EA Stop
+
+            if ($null -ne $Response.tenantSettings) {
+                $Script:PBIToken = $Response.tenantSettings
+            } elseif ($null -ne $Response.value) {
+                $Script:PBIToken = $Response.value
+            } elseif ($null -ne $Response.settings) {
+                $Script:PBIToken = $Response.settings
+            } else {
+                $Script:PBIToken = $Response
+            }
             Write-Host "    [OK] Power BI connected (Graph beta)" -ForegroundColor Green
             return
         } catch {
@@ -1997,8 +2148,9 @@ function Check-9_PBI {
                 Write-Info "    $($Script:PBIError)"
             }
             Write-Info "  Requirements:"
-            Write-Info "    1. Microsoft Graph > Tenant.Read.All (Application) permission + admin consent"
-            Write-Info "    2. Service principal must be assigned the 'Power BI Administrator' Entra ID role"
+            Write-Info "    1. Power BI Service > Tenant.Read.All (Application) permission + admin consent"
+            Write-Info "    2. Microsoft Graph > Tenant.Read.All (Application) permission + admin consent (fallback)"
+            Write-Info "    3. Service principal must be assigned the 'Power BI Administrator' Entra ID role"
             Write-Info "       Entra ID > Roles and administrators > Power BI Administrator > Add assignments"
             Write-Info "       -> search for your App Registration name and assign it"
             Write-Info "  Manual check: app.powerbi.com > Admin portal > Tenant settings > $SettingName"
@@ -2079,11 +2231,13 @@ function Show-Summary {
     Write-Host ""
     Write-Host "  Missing App Registration permissions (from WARN results):" -ForegroundColor Yellow
     Write-Host "    Exchange.ManageAsApp       - for app-only EXO connection" -ForegroundColor Gray
-    Write-Host "    DeviceManagementConfiguration.Read.All - for Intune checks (4.2)" -ForegroundColor Gray
+    Write-Host "    DeviceManagementConfiguration.Read.All - for Intune device settings (4.1)" -ForegroundColor Gray
+    Write-Host "    DeviceManagementServiceConfig.Read.All - for Intune enrollment configs (4.2)" -ForegroundColor Gray
     Write-Host "    InformationProtectionPolicy.Read.All   - for DLP/Labels (3.x)" -ForegroundColor Gray
     Write-Host "    PrivilegedAccess.Read.AzureAD          - for PIM checks (5.3.1)" -ForegroundColor Gray
     Write-Host "    AccessReview.Read.All                  - for access reviews (5.3.3)" -ForegroundColor Gray
-    Write-Host "    Tenant.Read.All (Microsoft Graph)      - for Power BI checks (9.x)" -ForegroundColor Gray
+    Write-Host "    Tenant.Read.All (Power BI Service)     - for Power BI checks (9.x)" -ForegroundColor Gray
+    Write-Host "    Tenant.Read.All (Microsoft Graph)      - for Power BI checks fallback (9.x)" -ForegroundColor Gray
     Write-Host ""
 
     try {
