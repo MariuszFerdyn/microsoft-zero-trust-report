@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Step-by-step helper to create/update the CIS audit app registration and set permissions.
 
@@ -62,7 +62,7 @@ param(
   [Parameter(Mandatory = $false)]
   [switch]$AutoLogin,
 
-  # UPN of an Exchange admin — used to connect and run New-ServicePrincipal + Add-RoleGroupMember.
+  # UPN of an Exchange admin - used to connect and run New-ServicePrincipal + Add-RoleGroupMember.
   # Required when -IncludeExchange is set and you want fully automated EXO app-only setup.
   [Parameter(Mandatory = $false)]
   [string]$ExchangeAdminUPN,
@@ -83,6 +83,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# EXO setup is always needed for a full benchmark run — default to enabled.
+# Pass -IncludeExchange:$false explicitly to skip it.
+if (-not $PSBoundParameters.ContainsKey('IncludeExchange')) {
+  $IncludeExchange = [switch]::Present
+}
 
 $script:AzReauthAttempted = $false
 
@@ -182,7 +188,10 @@ function Invoke-Az {
     return $text | ConvertFrom-Json
   }
 
-  return ($output | Out-String).TrimEnd()
+  # Same filter: drop stderr ErrorRecord objects (az warnings) so they don't
+  # corrupt plain-text output such as a freshly-created client secret.
+  $textLines = $output | Where-Object { $_ -is [string] }
+  return ($textLines | Out-String).TrimEnd()
 }
 
 function Invoke-AzRestJson {
@@ -462,7 +471,7 @@ if ($IncludeExchange) {
   Write-Section "Register SP in Exchange Online (New-ServicePrincipal + role group)"
 
   # Two steps are BOTH required for app-only EXO access:
-  #   1. New-ServicePrincipal  — registers the app SP inside Exchange Online's own RBAC directory.
+  #   1. New-ServicePrincipal  - registers the app SP inside Exchange Online's own RBAC directory.
   #      Without this, Connect-ExchangeOnline -AccessToken fails even if the Entra
   #      appRoleAssignment (Exchange.ManageAsApp) already exists.
   #   2. Add-RoleGroupMember   — grants the SP the read permissions it needs for audit checks.
@@ -474,7 +483,11 @@ if ($IncludeExchange) {
 
   if ($exoUpn) {
     try {
-      Ensure-Module "ExchangeOnlineManagement"
+      if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement -ErrorAction SilentlyContinue)) {
+        Write-Warn "ExchangeOnlineManagement module not found. Installing..."
+        Install-Module -Name ExchangeOnlineManagement -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+      }
+      Import-Module ExchangeOnlineManagement -ErrorAction Stop -WarningAction SilentlyContinue
       Write-Info "Connecting to Exchange Online as $exoUpn ..."
       Connect-ExchangeOnline -UserPrincipalName $exoUpn -ShowBanner:$false -ErrorAction Stop
 
@@ -515,7 +528,7 @@ if ($IncludeExchange) {
       Write-Info "  Disconnect-ExchangeOnline -Confirm:`$false"
     }
   } else {
-    Write-Warn "ExchangeAdminUPN not supplied — skipping EXO registration."
+    Write-Warn 'ExchangeAdminUPN not supplied - skipping EXO registration.'
     Write-Info "Run manually as Exchange admin:"
     Write-Info "  Connect-ExchangeOnline -UserPrincipalName admin@yourtenant.com"
     Write-Info "  New-ServicePrincipal -AppId '$AppId' -ObjectId '$spObjId' -DisplayName '$AppName'"
@@ -603,10 +616,40 @@ if ($AssignDirectoryRoles) {
   Wait-Step
 }
 
-# Resolve display values for the benchmark run command
-$domain        = if ($TenantDomain)       { $TenantDomain }       else { "<your-tenant>.onmicrosoft.com" }
-$spoUrl        = if ($SharePointAdminUrl) { $SharePointAdminUrl } else { "https://<your-tenant>-admin.sharepoint.com" }
-$secretDisplay = if ($secret)             { $secret }             else { "<your-client-secret>" }
+# Resolve display values for the benchmark run command.
+# Fetch verified domains once so we can derive both TenantDomain and the SPO admin URL.
+$orgDomains = @()
+try {
+  $orgDomains = @(Invoke-Az -AzArgs @(
+    "rest","--method","get",
+    "--url","https://graph.microsoft.com/v1.0/organization",
+    "--query","value[0].verifiedDomains[].{name:name,isDefault:isDefault}",
+    "-o","json"
+  ) -ExpectJson)
+} catch {
+  Write-Warn "Could not auto-resolve tenant domains: $($_.Exception.Message)"
+}
+
+if ($TenantDomain) {
+  $domain = $TenantDomain
+} else {
+  $defaultDomain = ($orgDomains | Where-Object { $_.isDefault } | Select-Object -First 1).name
+  $domain = if ($defaultDomain) { $defaultDomain } else { 'YOUR-TENANT.onmicrosoft.com' }
+}
+
+if ($SharePointAdminUrl) {
+  $spoUrl = $SharePointAdminUrl
+} else {
+  $onmsDomain = ($orgDomains | Where-Object { $_.name -like '*.onmicrosoft.com' } | Select-Object -First 1).name
+  if ($onmsDomain) {
+    $prefix = $onmsDomain -replace '\.onmicrosoft\.com$', ''
+    $spoUrl = "https://$prefix-admin.sharepoint.com"
+  } else {
+    $spoUrl = 'https://YOUR-TENANT-admin.sharepoint.com'
+  }
+}
+
+if ($secret) { $secretDisplay = $secret } else { $secretDisplay = 'YOUR-CLIENT-SECRET' }
 
 Write-Section "Output"
 $result = [ordered]@{
@@ -625,23 +668,21 @@ $result = [ordered]@{
 ($result | ConvertTo-Json -Depth 5) | Set-Content -Path $OutputPath -Encoding UTF8
 Write-Ok "Wrote: $OutputPath"
 
-Write-Host ""
-Write-Host "  +-----------------------------------------------------------------+" -ForegroundColor Cyan
-Write-Host "  |  Run the benchmark with:                                        |" -ForegroundColor Cyan
-Write-Host "  +-----------------------------------------------------------------+" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "  .\CIS_M365_Benchmark_Full.ps1 ``" -ForegroundColor White
-Write-Host "    -TenantId           `"$TenantId`" ``" -ForegroundColor White
-Write-Host "    -AppId              `"$AppId`" ``" -ForegroundColor White
-Write-Host "    -AppSecret          `"$secretDisplay`" ``" -ForegroundColor White
-Write-Host "    -TenantDomain       `"$domain`" ``" -ForegroundColor White
-Write-Host "    -SharePointAdminUrl `"$spoUrl`"" -ForegroundColor White
-Write-Host ""
+Write-Host ''
+Write-Host '  === Run the benchmark with: ===' -ForegroundColor Cyan
+Write-Host ''
+Write-Host "  .\CIS_M365_Benchmark_Full.ps1" -ForegroundColor White
+Write-Host "      -TenantId           $TenantId" -ForegroundColor White
+Write-Host "      -AppId              $AppId" -ForegroundColor White
+Write-Host "      -AppSecret          $secretDisplay" -ForegroundColor White
+Write-Host "      -TenantDomain       $domain" -ForegroundColor White
+Write-Host "      -SharePointAdminUrl $spoUrl" -ForegroundColor White
+Write-Host ''
 
 if (-not $NoPause) {
-  $runNow = Read-Host "  Run benchmark now? [Y/N]"
+  $runNow = Read-Host '  Run benchmark now? [Y/N]'
   if ($runNow -match '^[Yy]') {
-    $benchmarkPath = Join-Path $PSScriptRoot "CIS_M365_Benchmark_Full.ps1"
+    $benchmarkPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'CIS_M365_Benchmark_Full.ps1'
     if (Test-Path $benchmarkPath) {
       & $benchmarkPath `
         -TenantId           $TenantId `
@@ -650,8 +691,9 @@ if (-not $NoPause) {
         -TenantDomain       $domain `
         -SharePointAdminUrl $spoUrl
     } else {
-      Write-Warn "CIS_M365_Benchmark_Full.ps1 not found at: $benchmarkPath"
-      Write-Info "Make sure both scripts are in the same directory."
+      Write-Warn "Script not found: $benchmarkPath"
+      Write-Info 'Make sure both scripts are in the same directory.'
     }
   }
 }
+

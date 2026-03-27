@@ -365,11 +365,17 @@ function Connect-AllServices {
             }
             else {
                 Write-Host "  [FAIL] Exchange Online connection failed. EXO checks will be SKIPPED." -ForegroundColor Red
-                Write-Host "         Fix option A: Update EXO module (run as admin):" -ForegroundColor DarkYellow
-                Write-Host "                       Update-Module ExchangeOnlineManagement" -ForegroundColor Cyan
-                Write-Host "         Fix option B: Enable app-only auth (no browser prompt):" -ForegroundColor DarkYellow
-                Write-Host "                       Add 'Exchange.ManageAsApp' to App Registration" -ForegroundColor Cyan
-                Write-Host "                       + assign SP to 'View-Only Organization Management' in EAC" -ForegroundColor Cyan
+                Write-Host "" 
+                Write-Host "  Most likely cause: New-ServicePrincipal was never run for this app in EXO." -ForegroundColor Yellow
+                Write-Host "  Fix: connect as an Exchange admin and run:" -ForegroundColor DarkYellow
+                Write-Host "    Connect-ExchangeOnline -UserPrincipalName admin@yourtenant.com" -ForegroundColor Cyan
+                Write-Host "    New-ServicePrincipal -AppId '$AppId' -DisplayName 'CIS-M365-Benchmark-Audit'" -ForegroundColor Cyan
+                Write-Host "    Add-RoleGroupMember -Identity 'View-Only Organization Management' -Member '<SP-ObjectId>'" -ForegroundColor Cyan
+                Write-Host "  Or re-run CIS_M365_Permissions.ps1 with -IncludeExchange and -ExchangeAdminUPN." -ForegroundColor DarkYellow
+                Write-Host ""
+                Write-Host "  Other possible causes:" -ForegroundColor DarkGray
+                Write-Host "    - Exchange.ManageAsApp permission not granted (run CIS_M365_Permissions.ps1 -IncludeExchange)" -ForegroundColor DarkGray
+                Write-Host "    - EXO module out of date: Update-Module ExchangeOnlineManagement" -ForegroundColor DarkGray
             }
         }
         # FLAG IS SET ONLY HERE, INSIDE THE BLOCK, AFTER BOTH ATTEMPTS
