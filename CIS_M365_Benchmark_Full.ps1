@@ -2093,7 +2093,7 @@ function Check-8_5_9 {
 #  FIX: Use Power BI-specific OAuth token (scope: analysis.windows.net), fall back
 #       to Graph beta endpoint.
 #       - Power BI REST API requires 'Tenant.Read.All' on Power BI Service.
-#       - Graph beta fallback requires 'Tenant.Read.All' on Microsoft Graph.
+#       - Graph beta fallback uses existing Graph admin permissions (no extra scope needed).
 # ===============================================================================
 
 $Script:PBIToken = $null
@@ -2169,8 +2169,7 @@ function Check-9_PBI {
             } else {
                 Write-Info "  Requirements:"
                 Write-Info "    1. Power BI Service > Tenant.Read.All (Application) permission + admin consent"
-                Write-Info "    2. Microsoft Graph > Tenant.Read.All (Application) permission + admin consent (fallback)"
-                Write-Info "    3. Service principal must be assigned the 'Power BI Administrator' Entra ID role"
+                Write-Info "    2. Service principal must be assigned the 'Power BI Administrator' Entra ID role"
                 Write-Info "       Entra ID > Roles and administrators > Power BI Administrator > Add assignments"
                 Write-Info "       -> search for your App Registration name and assign it"
                 Write-Info "  Manual check: app.powerbi.com > Admin portal > Tenant settings > $SettingName"
@@ -2257,7 +2256,6 @@ function Show-Summary {
     Write-Host "    PrivilegedAccess.Read.AzureAD          - for PIM checks (5.3.1)" -ForegroundColor Gray
     Write-Host "    AccessReview.Read.All                  - for access reviews (5.3.3)" -ForegroundColor Gray
     Write-Host "    Tenant.Read.All (Power BI Service)     - for Power BI checks (9.x)" -ForegroundColor Gray
-    Write-Host "    Tenant.Read.All (Microsoft Graph)      - for Power BI checks fallback (9.x)" -ForegroundColor Gray
     Write-Host ""
 
     try {

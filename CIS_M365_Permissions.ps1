@@ -403,8 +403,7 @@ $graphPerms = @(
   "SecurityEvents.Read.All",
   "IdentityRiskyUser.Read.All",
   "AccessReview.Read.All",
-  "OrgSettings-Forms.ReadWrite.All",
-  "Tenant.Read.All"                   # Graph beta fallback for Power BI checks (9.x)
+  "OrgSettings-Forms.ReadWrite.All"
 ) | Sort-Object -Unique
 
 Write-Info "Adding Microsoft Graph app roles..."
@@ -481,6 +480,8 @@ if ($IncludeExchange) {
     $exoUpn = Read-Host "  Exchange admin UPN (e.g. admin@tenant.com)  [blank = skip this step]"
   }
 
+  $exoNeedsManualConfirm = $false
+
   if ($exoUpn) {
     try {
       if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement -ErrorAction SilentlyContinue)) {
@@ -519,24 +520,39 @@ if ($IncludeExchange) {
 
       Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
       Write-Ok "Exchange Online disconnected"
+      # Automated setup completed -- no manual confirmation needed
     } catch {
       Write-Warn "Exchange Online setup failed: $($_.Exception.Message)"
       Write-Info "Run manually as Exchange admin:"
-      Write-Info "  Connect-ExchangeOnline -UserPrincipalName admin@yourtenant.com"
+      Write-Info "  Connect-ExchangeOnline -UserPrincipalName $exoUpn"
       Write-Info "  New-ServicePrincipal -AppId '$AppId' -ObjectId '$spObjId' -DisplayName '$AppName'"
       Write-Info "  Add-RoleGroupMember -Identity 'View-Only Organization Management' -Member '$spObjId'"
       Write-Info "  Disconnect-ExchangeOnline -Confirm:`$false"
+      $exoNeedsManualConfirm = $true
     }
   } else {
-    Write-Warn 'ExchangeAdminUPN not supplied - skipping EXO registration.'
-    Write-Info "Run manually as Exchange admin:"
-    Write-Info "  Connect-ExchangeOnline -UserPrincipalName admin@yourtenant.com"
+    $manualUpn = if ($domain -and $domain -notmatch 'YOUR-TENANT') { "admin@$domain" } else { 'admin@yourtenant.com' }
+    Write-Warn "ExchangeAdminUPN not supplied - run these commands manually as Exchange admin:"
+    Write-Info "  Connect-ExchangeOnline -UserPrincipalName $manualUpn"
     Write-Info "  New-ServicePrincipal -AppId '$AppId' -ObjectId '$spObjId' -DisplayName '$AppName'"
     Write-Info "  Add-RoleGroupMember -Identity 'View-Only Organization Management' -Member '$spObjId'"
     Write-Info "  Disconnect-ExchangeOnline -Confirm:`$false"
+    $exoNeedsManualConfirm = $true
   }
 
-  Wait-Step
+  # Only ask for manual confirmation when the script couldn't do it automatically
+  if ($exoNeedsManualConfirm -and -not $NoPause) {
+    Write-Host ''
+    Write-Host '  Have you run it manually?' -ForegroundColor Cyan
+    Write-Host '  If so, type  continue  and press Enter to proceed.' -ForegroundColor Cyan
+    Write-Host '  You can also skip by pressing Enter -- Exchange Online will NOT be examined in the benchmark.' -ForegroundColor DarkGray
+    Write-Host ''
+    $exoAnswer = Read-Host '  Your answer'
+    if ($exoAnswer -notmatch '^\s*continue\s*$') {
+      Write-Warn 'EXO step skipped -- Exchange Online will be excluded from the benchmark command.'
+      $IncludeExchange = [switch]::new($false)
+    }
+  }
 }
 
 if ($AssignDirectoryRoles) {
@@ -677,6 +693,12 @@ Write-Host "      -AppId              $AppId" -ForegroundColor White
 Write-Host "      -AppSecret          $secretDisplay" -ForegroundColor White
 Write-Host "      -TenantDomain       $domain" -ForegroundColor White
 Write-Host "      -SharePointAdminUrl $spoUrl" -ForegroundColor White
+if (-not $IncludeExchange) {
+  Write-Host "      -GraphOnlyMode" -ForegroundColor DarkYellow
+  Write-Host '' 
+  Write-Host '  Note: -GraphOnlyMode added because EXO registration was skipped.' -ForegroundColor DarkYellow
+  Write-Host '  Re-run CIS_M365_Permissions.ps1 with -ExchangeAdminUPN to enable EXO checks.' -ForegroundColor DarkYellow
+}
 Write-Host ''
 
 if (-not $NoPause) {
@@ -684,12 +706,15 @@ if (-not $NoPause) {
   if ($runNow -match '^[Yy]') {
     $benchmarkPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'CIS_M365_Benchmark_Full.ps1'
     if (Test-Path $benchmarkPath) {
-      & $benchmarkPath `
-        -TenantId           $TenantId `
-        -AppId              $AppId `
-        -AppSecret          $secretDisplay `
-        -TenantDomain       $domain `
-        -SharePointAdminUrl $spoUrl
+      $benchmarkArgs = @{
+        TenantId           = $TenantId
+        AppId              = $AppId
+        AppSecret          = $secretDisplay
+        TenantDomain       = $domain
+        SharePointAdminUrl = $spoUrl
+      }
+      if (-not $IncludeExchange) { $benchmarkArgs['GraphOnlyMode'] = $true }
+      & $benchmarkPath @benchmarkArgs
     } else {
       Write-Warn "Script not found: $benchmarkPath"
       Write-Info 'Make sure both scripts are in the same directory.'
