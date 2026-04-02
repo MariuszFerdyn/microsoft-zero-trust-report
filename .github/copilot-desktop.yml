@@ -1,0 +1,4 @@
+instructions: Automatic tests CIS M365 Benchmark, written in PowerShell, to harden your M365 enviorment.
+automation:
+  auto_pr_review: true
+  auto_issue_session: true

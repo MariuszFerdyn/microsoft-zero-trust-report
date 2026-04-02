@@ -25,6 +25,17 @@
       [Sec 9]  Power BI: tries PBI-specific OAuth token first (scope: analysis.windows.net),
                falls back to Graph beta endpoint, clear WARN with permission instructions.
 
+    Fix log vs v3:
+      [EXO]    All EXO pipeline results wrapped in @() to prevent '.Count' errors on
+               deserialized objects (affects 1.2.2, 1.3.3, 2.1.3, 2.1.6, 2.1.9, 2.1.14,
+               6.1.3, 6.2.1, 6.2.2). PowerShell deserialized EXO objects may not expose
+               .Count when the result is $null or a single object.
+      [Sec 9]  Power BI: removed false 'not provisioned' assumption on 404; improved
+               diagnostics to mention 'Allow service principals to use Power BI APIs'
+               tenant setting, Power BI Admin role, and Tenant.Read.All permission.
+      [Summary]Missing permissions section is now dynamic - checks actual token scopes
+               instead of always showing a hardcoded list.
+
 .NOTES
     Required PowerShell Modules:
         Install-Module Microsoft.Graph          -Scope CurrentUser -Force
@@ -566,7 +577,7 @@ function Check-1_2_1 {
 function Check-1_2_2 {
     Invoke-Check "1.2.2 (L1)" "Ensure sign-in to shared mailboxes is blocked (Automated)" {
         if (-not (Assert-Exo)) { Add-Result "1.2.2" "Block shared mailbox sign-in" "WARN" "EXO not connected."; return }
-        $SharedMBX = Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited -EA Stop
+        $SharedMBX = @(Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited -EA Stop)
         $Enabled   = @()
         foreach ($mbx in $SharedMBX) {
             $u = Get-MgUser -UserId $mbx.ExternalDirectoryObjectId `
@@ -641,10 +652,10 @@ function Check-1_3_3 {
             return
         }
         try {
-            $SharingPolicies = Get-SharingPolicy -EA Stop
-            $AnonSharing = $SharingPolicies | Where-Object {
+            $SharingPolicies = @(Get-SharingPolicy -EA Stop)
+            $AnonSharing = @($SharingPolicies | Where-Object {
                 $_.Enabled -and ($_.Domains -like "*Anonymous*" -or $_.Domains -like "*CalendarSharingFreeBusyDetail*")
-            }
+            })
             if ($AnonSharing.Count -gt 0) {
                 Write-Fail "External calendar sharing policy allows anonymous access:"
                 $AnonSharing | ForEach-Object { Write-Info "  -> $($_.Name): $($_.Domains)" }
@@ -792,9 +803,9 @@ function Check-2_1_2 {
 function Check-2_1_3 {
     Invoke-Check "2.1.3 (L1)" "Ensure notifications for internal users sending malware is Enabled (Automated)" {
         if (-not (Assert-Exo)) { Add-Result "2.1.3" "Malware internal notification" "WARN" "EXO not connected."; return }
-        $OK = Get-MalwareFilterPolicy -EA Stop | Where-Object {
+        $OK = @(Get-MalwareFilterPolicy -EA Stop | Where-Object {
             $_.EnableInternalSenderAdminNotifications -and $_.InternalSenderAdminAddress
-        }
+        })
         if ($OK.Count -gt 0) {
             Write-Pass "Malware internal notification is configured."
             $OK | ForEach-Object { Write-Info "  -> $($_.Identity): $($_.InternalSenderAdminAddress)" }
@@ -828,9 +839,9 @@ function Check-2_1_5 {
 function Check-2_1_6 {
     Invoke-Check "2.1.6 (L1)" "Ensure Exchange Online Spam Policies are set to notify administrators (Automated)" {
         if (-not (Assert-Exo)) { Add-Result "2.1.6" "Spam admin notification" "WARN" "EXO not connected."; return }
-        $OK = Get-HostedOutboundSpamFilterPolicy -EA Stop | Where-Object {
+        $OK = @(Get-HostedOutboundSpamFilterPolicy -EA Stop | Where-Object {
             $_.BccSuspiciousOutboundMail -or $_.NotifyOutboundSpam
-        }
+        })
         if ($OK.Count -gt 0) {
             Write-Pass "Outbound spam admin notification is configured."
             $OK | ForEach-Object { Write-Info "  -> $($_.Identity): BCC=$($_.BccSuspiciousOutboundMail), Notify=$($_.NotifyOutboundSpam)" }
@@ -868,8 +879,8 @@ function Check-2_1_8 {
 function Check-2_1_9 {
     Invoke-Check "2.1.9 (L1)" "Ensure DKIM is enabled for all Exchange Online Domains (Automated)" {
         if (-not (Assert-Exo)) { Add-Result "2.1.9" "DKIM enabled all domains" "WARN" "EXO not connected."; return }
-        $Configs = Get-DkimSigningConfig -EA Stop
-        $Bad     = $Configs | Where-Object { -not $_.Enabled -or $_.Status -ne "Valid" }
+        $Configs = @(Get-DkimSigningConfig -EA Stop)
+        $Bad     = @($Configs | Where-Object { -not $_.Enabled -or $_.Status -ne "Valid" })
         if ($Bad.Count -eq 0) {
             Write-Pass "DKIM enabled and valid for all domains."
             $Configs | ForEach-Object { Write-Info "  -> $($_.Name): Enabled=$($_.Enabled), Status=$($_.Status)" }
@@ -928,7 +939,7 @@ function Check-2_1_13 {
 function Check-2_1_14 {
     Invoke-Check "2.1.14 (L1)" "Ensure inbound anti-spam policies do not contain allowed domains (Automated)" {
         if (-not (Assert-Exo)) { Add-Result "2.1.14" "No bypass domains in spam policy" "WARN" "EXO not connected."; return }
-        $Bad = Get-HostedContentFilterPolicy -EA Stop | Where-Object { $_.AllowedSenderDomains.Count -gt 0 }
+        $Bad = @(Get-HostedContentFilterPolicy -EA Stop | Where-Object { @($_.AllowedSenderDomains).Count -gt 0 })
         if ($Bad.Count -eq 0) {
             Write-Pass "No inbound spam policies contain allowed sender domains."
             Add-Result "2.1.14" "No bypass domains in spam policy" "PASS" "No bypass domains."
@@ -1649,8 +1660,8 @@ function Check-5_3_5 {
 function Check-6_1_3 {
     Invoke-Check "6.1.3 (L1)" "Ensure 'AuditBypassEnabled' is not enabled on mailboxes (Automated)" {
         if (-not (Assert-Exo)) { Add-Result "6.1.3" "AuditBypass not enabled" "WARN" "EXO not connected."; return }
-        $Report = Get-MailboxAuditBypassAssociation -ResultSize Unlimited -EA Stop |
-            Where-Object { $_.AuditBypassEnabled }
+        $Report = @(Get-MailboxAuditBypassAssociation -ResultSize Unlimited -EA Stop |
+            Where-Object { $_.AuditBypassEnabled })
         if ($Report.Count -eq 0) {
             Write-Pass "No mailboxes have AuditBypassEnabled = True."
             Add-Result "6.1.3" "AuditBypass not enabled" "PASS" "No audit bypass."
@@ -1665,10 +1676,10 @@ function Check-6_1_3 {
 function Check-6_2_1 {
     Invoke-Check "6.2.1 (L1)" "Ensure all forms of mail forwarding are blocked and/or disabled (Automated)" {
         if (-not (Assert-Exo)) { Add-Result "6.2.1" "Mail forwarding blocked" "WARN" "EXO not connected."; return }
-        $FwdRules = Get-TransportRule -EA Stop | Where-Object { $_.RedirectMessageTo }
-        $FwdPol   = Get-HostedOutboundSpamFilterPolicy -EA Stop | Where-Object {
+        $FwdRules = @(Get-TransportRule -EA Stop | Where-Object { $_.RedirectMessageTo })
+        $FwdPol   = @(Get-HostedOutboundSpamFilterPolicy -EA Stop | Where-Object {
             $_.AutoForwardingMode -notin @("Off", $null)
-        }
+        })
         if ($FwdRules.Count -eq 0 -and $FwdPol.Count -eq 0) {
             Write-Pass "No mail forwarding transport rules or risky policy settings found."
             Add-Result "6.2.1" "Mail forwarding blocked" "PASS" "No forwarding rules."
@@ -1689,9 +1700,9 @@ function Check-6_2_1 {
 function Check-6_2_2 {
     Invoke-Check "6.2.2 (L1)" "Ensure mail transport rules do not whitelist specific domains (Automated)" {
         if (-not (Assert-Exo)) { Add-Result "6.2.2" "No domain bypass rules" "WARN" "EXO not connected."; return }
-        $Bad = Get-TransportRule -EA Stop | Where-Object {
-            $_.SetScl -eq -1 -and $_.SenderDomainIs.Count -gt 0
-        }
+        $Bad = @(Get-TransportRule -EA Stop | Where-Object {
+            $_.SetScl -eq -1 -and @($_.SenderDomainIs).Count -gt 0
+        })
         if ($Bad.Count -eq 0) {
             Write-Pass "No transport rules bypass spam filtering for specific domains."
             Add-Result "6.2.2" "No domain bypass rules" "PASS" "No SCL=-1 domain rules."
@@ -2098,7 +2109,6 @@ function Check-8_5_9 {
 
 $Script:PBIToken = $null
 $Script:PBIChecked = $false
-$Script:PBINotProvisioned = $false
 
 function Get-PBITenantSettings {
     if (-not $Script:PBIChecked) {
@@ -2125,7 +2135,6 @@ function Get-PBITenantSettings {
             return
         } catch {
             $Script:PBIError = "PBI API: $($_.Exception.Message.Split([char]10)[0].Trim())"
-            if ($_.Exception.Message -match '404') { $Script:PBINotProvisioned = $true }
         }
 
         # Try 2: Graph beta endpoint
@@ -2162,19 +2171,17 @@ function Check-9_PBI {
                 Write-Info "  Actual errors encountered:"
                 Write-Info "    $($Script:PBIError)"
             }
-            if ($Script:PBINotProvisioned) {
-                Write-Info "  Note: API returned 404 - Power BI is not licensed/provisioned in this tenant."
-                Write-Info "  Manual check: Verify Power BI (Fabric/Pro/Premium) is part of the tenant license."
-                Add-Result $Section $Title "WARN" "Power BI not provisioned in this tenant (404 - no license)."
-            } else {
-                Write-Info "  Requirements:"
-                Write-Info "    1. Power BI Service > Tenant.Read.All (Application) permission + admin consent"
-                Write-Info "    2. Service principal must be assigned the 'Power BI Administrator' Entra ID role"
-                Write-Info "       Entra ID > Roles and administrators > Power BI Administrator > Add assignments"
-                Write-Info "       -> search for your App Registration name and assign it"
-                Write-Info "  Manual check: app.powerbi.com > Admin portal > Tenant settings > $SettingName"
-                Add-Result $Section $Title "WARN" "Power BI inaccessible - check Tenant.Read.All + Power BI Admin role."
-            }
+            Write-Info "  Likely causes (check all):"
+            Write-Info "    1. Power BI Service > Tenant.Read.All (Application) permission + admin consent"
+            Write-Info "    2. Service principal must be assigned the 'Power BI Administrator' (or 'Fabric Administrator') Entra ID role"
+            Write-Info "       Entra ID > Roles and administrators > Power BI Administrator > Add assignments"
+            Write-Info "       -> search for your App Registration name and assign it"
+            Write-Info "    3. Power BI Admin portal > Tenant settings > Developer settings >"
+            Write-Info "       'Allow service principals to use Power BI APIs' must be ENABLED"
+            Write-Info "       (add the service principal or its security group to the allowed list)"
+            Write-Info "    4. If Power BI is truly not licensed/provisioned, all Section 9 checks are N/A"
+            Write-Info "  Manual check: app.powerbi.com > Admin portal > Tenant settings > $SettingName"
+            Add-Result $Section $Title "WARN" "Power BI inaccessible - check Tenant.Read.All + Power BI Admin role + 'Allow service principals to use Power BI APIs'."
             return
         }
         # Handle both endpoint response shapes
@@ -2249,13 +2256,40 @@ function Show-Summary {
         Write-Host ("    {0,-6}: {1}" -f $_, $msg) -ForegroundColor $col
     }
     Write-Host ""
-    Write-Host "  Missing App Registration permissions (from WARN results):" -ForegroundColor Yellow
-    Write-Host "    DeviceManagementConfiguration.Read.All - for Intune device settings (4.1)" -ForegroundColor Gray
-    Write-Host "    DeviceManagementServiceConfig.Read.All - for Intune enrollment configs (4.2)" -ForegroundColor Gray
-    Write-Host "    InformationProtectionPolicy.Read.All   - for DLP/Labels (3.x)" -ForegroundColor Gray
-    Write-Host "    PrivilegedAccess.Read.AzureAD          - for PIM checks (5.3.1)" -ForegroundColor Gray
-    Write-Host "    AccessReview.Read.All                  - for access reviews (5.3.3)" -ForegroundColor Gray
-    Write-Host "    Tenant.Read.All (Power BI Service)     - for Power BI checks (9.x)" -ForegroundColor Gray
+    # Dynamic missing permissions detection based on token scopes
+    $MissingPerms = @()
+    try {
+        $ctx = Get-MgContext -EA SilentlyContinue
+        if ($ctx -and $ctx.Scopes) {
+            $grantedScopes = $ctx.Scopes
+            $requiredPerms = @(
+                @{ Scope = "DeviceManagementConfiguration.Read.All"; Desc = "for Intune device settings (4.1)" },
+                @{ Scope = "DeviceManagementServiceConfig.Read.All"; Desc = "for Intune enrollment configs (4.2)" },
+                @{ Scope = "InformationProtectionPolicy.Read.All";   Desc = "for DLP/Labels (3.x)" },
+                @{ Scope = "PrivilegedAccess.Read.AzureAD";          Desc = "for PIM checks (5.3.1)" },
+                @{ Scope = "AccessReview.Read.All";                  Desc = "for access reviews (5.3.3)" }
+            )
+            foreach ($perm in $requiredPerms) {
+                if ($perm.Scope -notin $grantedScopes) {
+                    $MissingPerms += $perm
+                }
+            }
+        }
+    } catch { }
+    # Power BI Service permission (separate API, not in Graph scopes)
+    $hasPBIWarn = $Script:Results | Where-Object { $_.Section -like "9.1*" -and $_.Status -eq "WARN" }
+    if ($hasPBIWarn) {
+        $MissingPerms += @{ Scope = "Tenant.Read.All (Power BI Service)"; Desc = "for Power BI checks (9.x) + Power BI Admin role + 'Allow service principals to use Power BI APIs'" }
+    }
+    if ($MissingPerms.Count -gt 0) {
+        Write-Host "  Missing or ineffective App Registration permissions:" -ForegroundColor Yellow
+        foreach ($mp in $MissingPerms) {
+            $padded = $mp.Scope.PadRight(42)
+            Write-Host "    $padded - $($mp.Desc)" -ForegroundColor Gray
+        }
+    } else {
+        Write-Host "  All required Microsoft Graph permissions appear to be granted." -ForegroundColor Green
+    }
     Write-Host ""
 
     try {

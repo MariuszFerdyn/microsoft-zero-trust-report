@@ -11,9 +11,12 @@
     - Add Power BI Service application permission: Tenant.Read.All
     - Optionally add Exchange Online application permission: Exchange.ManageAsApp
     - Grant admin consent
-    - Optionally assign Entra directory roles to the service principal:
+    - Enable 'Allow service principals to use Power BI APIs' in Power BI Admin portal
+      (creates a security group, adds SP, and attempts to enable the setting via API)
+    - Assign Entra directory roles to the service principal (by default; use -SkipDirectoryRoles to opt out):
         * Power BI Administrator (or Power BI Service Administrator / Fabric Administrator)
         * Intune Administrator
+    - Verify all granted permissions and report missing ones (dynamic check)
 
   Notes:
     - Directory roles assignment requires you to run this while signed in as an account
@@ -25,8 +28,12 @@
   .\CIS_M365_Permissions.ps1 -TenantId "<tenant-guid>" -AppName "CIS-M365-Benchmark-Audit"
 
 .EXAMPLE
-  # Reuse an existing appId, include Exchange, and assign Entra admin roles
-  .\CIS_M365_Permissions.ps1 -TenantId "<tenant-guid>" -AppId "<app-guid>" -IncludeExchange -AssignDirectoryRoles
+  # Reuse an existing appId, include Exchange (directory roles are assigned by default)
+  .\CIS_M365_Permissions.ps1 -TenantId "<tenant-guid>" -AppId "<app-guid>" -IncludeExchange
+
+.EXAMPLE
+  # Skip directory role assignment (Power BI Admin, Intune Admin)
+  .\CIS_M365_Permissions.ps1 -TenantId "<tenant-guid>" -SkipDirectoryRoles
 
 .EXAMPLE
   # Auto-login to the expected tenant if Azure CLI is logged into a different one
@@ -54,7 +61,7 @@ param(
   [switch]$IncludeExchange,
 
   [Parameter(Mandatory = $false)]
-  [switch]$AssignDirectoryRoles,
+  [switch]$SkipDirectoryRoles,
 
   [Parameter(Mandatory = $false)]
   [switch]$NoPause,
@@ -129,9 +136,17 @@ function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor
 function Write-Warn([string]$Message) { Write-Host "  ! $Message" -ForegroundColor Yellow }
 function Write-Info([string]$Message) { Write-Host "  i $Message" -ForegroundColor DarkGray }
 
-function Wait-Step([string]$Message = "Press Enter to continue") {
+function Wait-Step {
   if (-not $NoPause) {
-    [void](Read-Host $Message)
+    [void](Read-Host "Press Enter to continue")
+  }
+}
+
+function Wait-ManualStep([string]$Message = "Complete the manual step above, then type 'continue' to proceed") {
+  if (-not $NoPause) {
+    do {
+      $response = Read-Host $Message
+    } while ($response -ne 'continue')
   }
 }
 
@@ -425,9 +440,48 @@ Write-Section "Grant admin consent"
 Invoke-Az -AzArgs @("ad","app","permission","admin-consent","--id", $AppId) | Out-Null
 Write-Ok "Admin consent granted"
 
-# 'az ad app permission admin-consent' handles Graph + Power BI correctly,
-# but silently skips Exchange Online (Office 365 Exchange Online). We must
-# create the appRoleAssignment for Exchange.ManageAsApp directly via Graph API.
+# 'az ad app permission admin-consent' often silently skips non-Graph APIs
+# (Power BI Service, Exchange Online). We must create the appRoleAssignment
+# directly via Graph API to ensure the permission is actually granted.
+
+# --- Power BI: Tenant.Read.All ---
+Write-Info "Directly creating Power BI Tenant.Read.All appRoleAssignment (admin-consent may skip PBI)..."
+$pbiSpObjectId = $null
+try {
+  $pbiSpObjectId = Invoke-Az -AzArgs @("ad","sp","show","--id", $pbiResource, "--query","id","-o","tsv")
+  $pbiSpObjectId = $pbiSpObjectId.Trim()
+} catch {
+  Write-Warn "Could not resolve Power BI Service SP ObjectId - skipping direct appRoleAssignment: $_"
+}
+
+if ($pbiSpObjectId) {
+  $pbiTenantReadRole = ($pbiAppRoles | Where-Object { $_.value -eq "Tenant.Read.All" }).id
+  if ($pbiTenantReadRole) {
+    $assignBody = @{
+      principalId = $spObjId
+      resourceId  = $pbiSpObjectId
+      appRoleId   = $pbiTenantReadRole
+    } | ConvertTo-Json -Compress
+
+    try {
+      Invoke-AzRestJson -Method POST `
+        -Url "https://graph.microsoft.com/v1.0/servicePrincipals/$spObjId/appRoleAssignments" `
+        -BodyJson $assignBody | Out-Null
+      Write-Ok "Power BI Tenant.Read.All appRoleAssignment created"
+    } catch {
+      $msg = $_.Exception.Message
+      if ($msg -match "already exist" -or $msg -match "Permission being assigned already exists") {
+        Write-Ok "Power BI Tenant.Read.All appRoleAssignment already exists"
+      } else {
+        Write-Warn "Failed to create Power BI Tenant.Read.All appRoleAssignment: $msg"
+      }
+    }
+  } else {
+    Write-Warn "Could not find Tenant.Read.All role ID in Power BI Service app roles"
+  }
+}
+
+# --- Exchange Online: Exchange.ManageAsApp ---
 if ($IncludeExchange) {
   Write-Info "Directly creating Exchange.ManageAsApp appRoleAssignment (admin-consent skips EXO)..."
 
@@ -555,8 +609,145 @@ if ($IncludeExchange) {
   }
 }
 
-if ($AssignDirectoryRoles) {
-  Write-Section "Assign Entra directory roles (optional)"
+# ---------------------------------------------------------------------------
+#  Power BI: Enable 'Allow service principals to use Power BI APIs'
+#  This requires:
+#    a) a security group that contains the service principal
+#    b) the PBI tenant setting referencing that group
+# ---------------------------------------------------------------------------
+Write-Section "Power BI: Enable service principal API access"
+
+$pbiSecGroupName = "CIS-Audit-PowerBI-ServicePrincipals"
+$pbiSecGroupId   = $null
+
+# 1. Create or find the security group
+try {
+  $existingGroup = Invoke-Az -AzArgs @("ad","group","show","--group", $pbiSecGroupName, "-o","json") -ExpectJson
+  $pbiSecGroupId = $existingGroup.id
+  Write-Ok "Security group already exists: $pbiSecGroupName ($pbiSecGroupId)"
+} catch {
+  try {
+    $newGroup = Invoke-Az -AzArgs @(
+      "ad","group","create",
+      "--display-name", $pbiSecGroupName,
+      "--mail-nickname", "CISAuditPBISPs",
+      "--description", "Service principals allowed to use Power BI Admin APIs for CIS benchmark audit",
+      "-o","json"
+    ) -ExpectJson
+    $pbiSecGroupId = $newGroup.id
+    Write-Ok "Created security group: $pbiSecGroupName ($pbiSecGroupId)"
+  } catch {
+    Write-Warn "Could not create security group: $($_.Exception.Message)"
+  }
+}
+
+# 2. Add the service principal to the group
+if ($pbiSecGroupId) {
+  try {
+    $isMember = $false
+    try {
+      $members = Invoke-Az -AzArgs @("ad","group","member","list","--group", $pbiSecGroupId, "--query","[].id","-o","json") -ExpectJson
+      $isMember = $spObjId -in $members
+    } catch { }
+
+    if ($isMember) {
+      Write-Ok "SP already a member of $pbiSecGroupName"
+    } else {
+      Invoke-Az -AzArgs @("ad","group","member","add","--group", $pbiSecGroupId, "--member-id", $spObjId) | Out-Null
+      Write-Ok "Added SP to security group: $pbiSecGroupName"
+    }
+  } catch {
+    $msg = $_.Exception.Message
+    if ($msg -match "already exist") {
+      Write-Ok "SP already a member of $pbiSecGroupName"
+    } else {
+      Write-Warn "Could not add SP to security group: $msg"
+    }
+  }
+}
+
+# 3. Try to enable the PBI tenant setting via Power BI Admin API
+$pbiSettingDone = $false
+if ($pbiSecGroupId) {
+  try {
+    # Get a PBI API token for the current az CLI user (who should be a PBI/Global admin)
+    $pbiAccessToken = Invoke-Az -AzArgs @("account","get-access-token","--resource","https://analysis.windows.net/powerbi/api","--query","accessToken","-o","tsv")
+    $pbiAccessToken = $pbiAccessToken.Trim()
+
+    if ($pbiAccessToken) {
+      $pbiHeaders = @{
+        Authorization  = "Bearer $pbiAccessToken"
+        'Content-Type' = 'application/json'
+      }
+
+      # Read current tenant settings to check if already enabled
+      try {
+        $currentSettings = Invoke-RestMethod -Method GET `
+          -Uri "https://api.powerbi.com/v1.0/myorg/admin/tenantSettings" `
+          -Headers $pbiHeaders -ErrorAction Stop
+        $spSetting = $currentSettings.tenantSettings | Where-Object {
+          $_.settingName -eq "ServicePrincipalAccess" -or $_.settingName -eq "AllowServicePrincipalsUseReadAdminAPIsAPI"
+        } | Select-Object -First 1
+
+        if ($spSetting -and $spSetting.enabled -eq $true) {
+          Write-Ok "'Allow service principals to use Power BI APIs' is already ENABLED"
+          $pbiSettingDone = $true
+        }
+      } catch { }
+
+      if (-not $pbiSettingDone) {
+        # Try to enable the setting via PATCH
+        $patchBody = @{
+          tenantSettings = @(
+            @{
+              settingName        = "ServicePrincipalAccess"
+              enabled            = $true
+              tenantSettingGroup = "Developer"
+              properties         = @(
+                @{
+                  name  = "SecurityGroupIds"
+                  value = $pbiSecGroupId
+                }
+              )
+            }
+          )
+        } | ConvertTo-Json -Depth 5
+
+        try {
+          Invoke-RestMethod -Method PATCH `
+            -Uri "https://api.powerbi.com/v1.0/myorg/admin/tenantSettings" `
+            -Headers $pbiHeaders -Body $patchBody -ErrorAction Stop | Out-Null
+          Write-Ok "Enabled 'Allow service principals to use Power BI APIs' with group $pbiSecGroupName"
+          $pbiSettingDone = $true
+        } catch {
+          Write-Info "  Could not enable PBI setting via API: $($_.Exception.Message.Split([char]10)[0].Trim())"
+        }
+      }
+    }
+  } catch {
+    Write-Info "  Could not get Power BI API token: $($_.Exception.Message.Split([char]10)[0].Trim())"
+  }
+}
+
+if (-not $pbiSettingDone) {
+  Write-Warn "Manual step required for Power BI Section 9 checks:"
+  Write-Host "  1. Go to: https://app.powerbi.com/admin-portal/tenantSettings?experience=power-bi" -ForegroundColor Yellow
+  Write-Host "  2. Under 'Developer settings', find 'Allow service principals to use Power BI APIs'" -ForegroundColor Yellow
+  Write-Host "  3. Set it to ENABLED" -ForegroundColor Yellow
+  if ($pbiSecGroupId) {
+    Write-Host "  4. Under 'Apply to:', select 'Specific security groups' and add:" -ForegroundColor Yellow
+    Write-Host "     Group: $pbiSecGroupName" -ForegroundColor Cyan
+  } else {
+    Write-Host "  4. Under 'Apply to:', add a security group containing the service principal" -ForegroundColor Yellow
+  }
+  Write-Host ""
+  Wait-ManualStep
+} else {
+  Wait-Step
+}
+
+if (-not $SkipDirectoryRoles) {
+  Write-Section "Assign Entra directory roles"
 
   $templates = Invoke-AzRestJson -Method GET -Url 'https://graph.microsoft.com/v1.0/directoryRoleTemplates?$select=id,displayName'
   $templateList = @($templates.value)
@@ -668,6 +859,107 @@ if ($SharePointAdminUrl) {
 if ($secret) { $secretDisplay = $secret } else { $secretDisplay = 'YOUR-CLIENT-SECRET' }
 
 Write-Section "Output"
+
+# ---------------------------------------------------------------------------
+#  Verify granted permissions (dynamic check)
+# ---------------------------------------------------------------------------
+Write-Info "Verifying granted permissions..."
+$grantedRoles = @()
+try {
+  $grantedRoles = @(Invoke-AzRestJson -Method GET `
+    -Url "https://graph.microsoft.com/v1.0/servicePrincipals/$spObjId/appRoleAssignments?`$select=appRoleId,resourceDisplayName" |
+    Select-Object -ExpandProperty value)
+} catch {
+  Write-Warn "Could not query granted permissions: $($_.Exception.Message)"
+}
+
+if ($grantedRoles.Count -gt 0) {
+  # Build a lookup: appRoleId -> permission name for Graph, PBI, EXO
+  $allAppRoleLookup = @{}
+  @($graphAppRoles) | ForEach-Object { $allAppRoleLookup[$_.id] = $_.value }
+  @($pbiAppRoles)   | ForEach-Object { $allAppRoleLookup[$_.id] = $_.value }
+  if ($exoAppRoles) {
+    @($exoAppRoles)  | ForEach-Object { $allAppRoleLookup[$_.id] = $_.value }
+  }
+
+  $grantedPermNames = $grantedRoles | ForEach-Object { $allAppRoleLookup[$_.appRoleId] } | Where-Object { $_ }
+
+  # Required permissions list
+  $requiredPerms = @(
+    @{ Scope = "Policy.Read.All";                          Api = "Graph" },
+    @{ Scope = "Policy.Read.AuthenticationMethod";         Api = "Graph" },
+    @{ Scope = "AuditLog.Read.All";                        Api = "Graph" },
+    @{ Scope = "Directory.Read.All";                       Api = "Graph" },
+    @{ Scope = "Domain.Read.All";                          Api = "Graph" },
+    @{ Scope = "Group.Read.All";                           Api = "Graph" },
+    @{ Scope = "User.Read.All";                            Api = "Graph" },
+    @{ Scope = "Organization.Read.All";                    Api = "Graph" },
+    @{ Scope = "RoleManagement.Read.All";                  Api = "Graph" },
+    @{ Scope = "RoleManagement.Read.Directory";            Api = "Graph" },
+    @{ Scope = "DeviceManagementConfiguration.Read.All";   Api = "Graph" },
+    @{ Scope = "DeviceManagementServiceConfig.Read.All";   Api = "Graph" },
+    @{ Scope = "PrivilegedAccess.Read.AzureAD";            Api = "Graph" },
+    @{ Scope = "InformationProtectionPolicy.Read.All";     Api = "Graph" },
+    @{ Scope = "SecurityEvents.Read.All";                  Api = "Graph" },
+    @{ Scope = "IdentityRiskyUser.Read.All";               Api = "Graph" },
+    @{ Scope = "AccessReview.Read.All";                    Api = "Graph" },
+    @{ Scope = "OrgSettings-Forms.ReadWrite.All";          Api = "Graph" },
+    @{ Scope = "Tenant.Read.All";                          Api = "Power BI" }
+  )
+  if ($IncludeExchange) {
+    $requiredPerms += @{ Scope = "Exchange.ManageAsApp"; Api = "Exchange" }
+  }
+
+  $missing  = @($requiredPerms | Where-Object { $_.Scope -notin $grantedPermNames })
+  $granted  = @($requiredPerms | Where-Object { $_.Scope -in $grantedPermNames })
+
+  Write-Host ""
+  if ($granted.Count -gt 0) {
+    Write-Host "  Granted permissions ($($granted.Count)):" -ForegroundColor Green
+    foreach ($p in $granted) {
+      Write-Host "    [OK] $($p.Scope)  ($($p.Api))" -ForegroundColor Green
+    }
+  }
+  if ($missing.Count -gt 0) {
+    Write-Host "  Missing permissions ($($missing.Count)):" -ForegroundColor Red
+    foreach ($p in $missing) {
+      Write-Host "    [!!] $($p.Scope)  ($($p.Api))" -ForegroundColor Red
+    }
+    Write-Host ""
+    Write-Warn "Some permissions were not granted. Re-run admin consent or check the Entra portal."
+    Write-Host "  az ad app permission admin-consent --id $AppId" -ForegroundColor Gray
+  } else {
+    Write-Host ""
+    Write-Ok "All required API permissions are granted."
+  }
+  Write-Host ""
+
+  # Check directory role assignments
+  $roleAssignments = @()
+  try {
+    $memberOf = Invoke-AzRestJson -Method GET `
+      -Url "https://graph.microsoft.com/v1.0/servicePrincipals/$spObjId/memberOf?`$select=displayName,roleTemplateId"
+    $roleAssignments = @($memberOf.value | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.directoryRole' })
+  } catch { }
+
+  $requiredRoles = @("Power BI Administrator", "Power BI Service Administrator", "Fabric Administrator", "Intune Administrator")
+  $hasPBI    = $roleAssignments | Where-Object { $_.displayName -in @("Power BI Administrator","Power BI Service Administrator","Fabric Administrator") }
+  $hasIntune = $roleAssignments | Where-Object { $_.displayName -eq "Intune Administrator" }
+
+  Write-Host "  Directory role assignments:" -ForegroundColor Yellow
+  if ($hasPBI)    { Write-Host "    [OK] $($hasPBI.displayName | Select-Object -First 1)" -ForegroundColor Green }
+  else            { Write-Host "    [!!] Power BI / Fabric Administrator  (not assigned)" -ForegroundColor Red }
+  if ($hasIntune) { Write-Host "    [OK] Intune Administrator" -ForegroundColor Green }
+  else            { Write-Host "    [!!] Intune Administrator  (not assigned)" -ForegroundColor Red }
+
+  # Power BI API access check
+  if (-not $pbiSettingDone) {
+    Write-Host "    [!!] 'Allow service principals to use Power BI APIs' may need manual enablement (see above)" -ForegroundColor Yellow
+  } else {
+    Write-Host "    [OK] Allow service principals to use Power BI APIs" -ForegroundColor Green
+  }
+  Write-Host ""
+}
 $result = [ordered]@{
   TenantId                 = $TenantId
   TenantDomain             = $domain
@@ -677,7 +969,7 @@ $result = [ordered]@{
   ClientSecret             = $secret
   SharePointAdminUrl       = $spoUrl
   IncludeExchange          = [bool]$IncludeExchange
-  AssignedDirectoryRoles   = [bool]$AssignDirectoryRoles
+  AssignedDirectoryRoles   = (-not $SkipDirectoryRoles)
   GeneratedAt              = (Get-Date).ToString('o')
 }
 
