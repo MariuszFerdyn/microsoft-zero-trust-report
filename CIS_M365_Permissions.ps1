@@ -11,8 +11,8 @@
     - Add Power BI Service application permission: Tenant.Read.All
     - Optionally add Exchange Online application permission: Exchange.ManageAsApp
     - Grant admin consent
-    - Enable 'Allow service principals to use Power BI APIs' in Power BI Admin portal
-      (creates a security group, adds SP, and attempts to enable the setting via API)
+    - Create a security group for Power BI / Fabric service-principal access and
+      verify the required Fabric tenant settings
     - Assign Entra directory roles to the service principal (by default; use -SkipDirectoryRoles to opt out):
         * Power BI Administrator (or Power BI Service Administrator / Fabric Administrator)
         * Intune Administrator
@@ -336,6 +336,67 @@ function Ensure-AzTenant([string]$ExpectedTenantId) {
   return $acct
 }
 
+function Wait-ForEntraApplication([string]$TargetAppId, [int]$MaxAttempts = 12, [int]$DelaySeconds = 5) {
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+    try {
+      $app = Invoke-Az -AzArgs @("ad","app","show","--id", $TargetAppId, "-o","json") -ExpectJson
+      if ($app -and $app.appId -eq $TargetAppId) {
+        if ($attempt -gt 1) {
+          Write-Info "App registration is now visible in Entra ID (attempt $attempt/$MaxAttempts)"
+        }
+        return $app
+      }
+    } catch {
+      if ($attempt -eq 1) {
+        Write-Info "Waiting for new app registration to replicate in Entra ID..."
+      }
+    }
+
+    if ($attempt -lt $MaxAttempts) {
+      Start-Sleep -Seconds $DelaySeconds
+    }
+  }
+
+  throw "Timed out waiting for app registration '$TargetAppId' to become available in Entra ID."
+}
+
+function Ensure-ServicePrincipalForApp([string]$TargetAppId, [int]$MaxAttempts = 12, [int]$DelaySeconds = 5) {
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+    try {
+      $sp = Invoke-Az -AzArgs @("ad","sp","show","--id", $TargetAppId, "-o","json") -ExpectJson
+      if ($sp -and $sp.id) {
+        return [PSCustomObject]@{ ObjectId = $sp.id; Created = $false }
+      }
+    } catch { }
+
+    try {
+      $spObjId = Invoke-Az -AzArgs @("ad","sp","create","--id", $TargetAppId, "--query","id","-o","tsv")
+      if (-not [string]::IsNullOrWhiteSpace($spObjId)) {
+        return [PSCustomObject]@{ ObjectId = $spObjId.Trim(); Created = $true }
+      }
+    } catch {
+      $msg = $_.Exception.Message
+      $isRetryable = (
+        $msg -match "does not reference a valid application object" -or
+        $msg -match "does not exist or one of its queried reference-property objects are not present" -or
+        $msg -match "Request_ResourceNotFound"
+      )
+
+      if ((-not $isRetryable) -or $attempt -eq $MaxAttempts) {
+        throw
+      }
+
+      if ($attempt -eq 1) {
+        Write-Info "Service principal creation is waiting for Entra replication..."
+      }
+    }
+
+    Start-Sleep -Seconds $DelaySeconds
+  }
+
+  throw "Timed out creating service principal for app '$TargetAppId'."
+}
+
 # Ensure we are logged in and tenant matches
 $acct = Ensure-AzTenant -ExpectedTenantId $TenantId
 Write-Ok "Azure CLI logged in to tenant $TenantId"
@@ -345,24 +406,23 @@ Write-Section "Create or reuse App Registration"
 if (-not $AppId) {
   $app = Invoke-Az -AzArgs @("ad","app","create","--display-name", $AppName, "-o","json") -ExpectJson
   $AppId = $app.appId
+  Wait-ForEntraApplication -TargetAppId $AppId | Out-Null
   Write-Ok "Created app: $AppName"
   Write-Ok "AppId: $AppId"
 } else {
   # Verify app exists
-  Invoke-Az -AzArgs @("ad","app","show","--id", $AppId, "-o","json") -ExpectJson | Out-Null
+  Wait-ForEntraApplication -TargetAppId $AppId | Out-Null
   Write-Ok "Using existing AppId: $AppId"
 }
 Wait-Step
 
 Write-Section "Ensure Service Principal"
-$spObjId = $null
-try {
-  $sp = Invoke-Az -AzArgs @("ad","sp","show","--id", $AppId, "-o","json") -ExpectJson
-  $spObjId = $sp.id
-  Write-Ok "Service principal exists"
-} catch {
-  $spObjId = Invoke-Az -AzArgs @("ad","sp","create","--id", $AppId, "--query","id","-o","tsv")
+$spResult = Ensure-ServicePrincipalForApp -TargetAppId $AppId
+$spObjId = $spResult.ObjectId
+if ($spResult.Created) {
   Write-Ok "Created service principal"
+} else {
+  Write-Ok "Service principal exists"
 }
 Write-Ok "ObjectId (SP): $spObjId"
 Wait-Step
@@ -610,12 +670,12 @@ if ($IncludeExchange) {
 }
 
 # ---------------------------------------------------------------------------
-#  Power BI: Enable 'Allow service principals to use Power BI APIs'
+#  Power BI / Fabric: verify service principal API access requirements
 #  This requires:
 #    a) a security group that contains the service principal
-#    b) the PBI tenant setting referencing that group
+#    b) Fabric Admin API settings allowing that group
 # ---------------------------------------------------------------------------
-Write-Section "Power BI: Enable service principal API access"
+Write-Section "Power BI / Fabric: Verify service principal API access"
 
 $pbiSecGroupName = "CIS-Audit-PowerBI-ServicePrincipals"
 $pbiSecGroupId   = $null
@@ -666,12 +726,11 @@ if ($pbiSecGroupId) {
   }
 }
 
-# 3. Try to enable the PBI tenant setting via Power BI Admin API
+# 3. Read current Fabric tenant settings using the signed-in admin user
 $pbiSettingDone = $false
 if ($pbiSecGroupId) {
   try {
-    # Get a PBI API token for the current az CLI user (who should be a PBI/Global admin)
-    $pbiAccessToken = Invoke-Az -AzArgs @("account","get-access-token","--resource","https://analysis.windows.net/powerbi/api","--query","accessToken","-o","tsv")
+    $pbiAccessToken = Invoke-Az -AzArgs @("account","get-access-token","--resource","https://api.fabric.microsoft.com","--query","accessToken","-o","tsv")
     $pbiAccessToken = $pbiAccessToken.Trim()
 
     if ($pbiAccessToken) {
@@ -680,66 +739,57 @@ if ($pbiSecGroupId) {
         'Content-Type' = 'application/json'
       }
 
-      # Read current tenant settings to check if already enabled
       try {
         $currentSettings = Invoke-RestMethod -Method GET `
-          -Uri "https://api.powerbi.com/v1.0/myorg/admin/tenantSettings" `
+          -Uri "https://api.fabric.microsoft.com/v1/admin/tenantsettings" `
           -Headers $pbiHeaders -ErrorAction Stop
-        $spSetting = $currentSettings.tenantSettings | Where-Object {
-          $_.settingName -eq "ServicePrincipalAccess" -or $_.settingName -eq "AllowServicePrincipalsUseReadAdminAPIsAPI"
-        } | Select-Object -First 1
 
-        if ($spSetting -and $spSetting.enabled -eq $true) {
-          Write-Ok "'Allow service principals to use Power BI APIs' is already ENABLED"
-          $pbiSettingDone = $true
+        $tenantSettings = @($currentSettings.value)
+        $readAdminSetting = $tenantSettings | Where-Object { $_.settingName -eq "AllowServicePrincipalsUseReadAdminAPIs" } | Select-Object -First 1
+        $publicApiSetting = $tenantSettings | Where-Object { $_.settingName -eq "ServicePrincipalAccessPermissionAPIs" } | Select-Object -First 1
+        $profilesSetting = $tenantSettings | Where-Object { $_.settingName -eq "AllowServicePrincipalsCreateAndUseProfiles" } | Select-Object -First 1
+        $workspaceSetting = $tenantSettings | Where-Object { $_.settingName -eq "ServicePrincipalAccessGlobalAPIs" } | Select-Object -First 1
+
+        $readAdminGroupIds = @($readAdminSetting.enabledSecurityGroups | ForEach-Object { $_.graphId })
+        $readAdminAppliesToSp = ($readAdminGroupIds.Count -eq 0) -or ($pbiSecGroupId -in $readAdminGroupIds)
+
+        if ($readAdminSetting) {
+          Write-Info "Fabric setting: $($readAdminSetting.title) => enabled=$($readAdminSetting.enabled)"
+          if ($readAdminSetting.enabled -and $readAdminAppliesToSp) {
+            Write-Ok "Fabric read-only admin APIs are enabled for this service principal (or its group)"
+            $pbiSettingDone = $true
+          }
+        }
+        if ($publicApiSetting) {
+          Write-Info "Fabric setting: $($publicApiSetting.title) => enabled=$($publicApiSetting.enabled)"
+        }
+        if ($profilesSetting) {
+          Write-Info "Fabric setting: $($profilesSetting.title) => enabled=$($profilesSetting.enabled)"
+        }
+        if ($workspaceSetting) {
+          Write-Info "Fabric setting: $($workspaceSetting.title) => enabled=$($workspaceSetting.enabled)"
         }
       } catch { }
-
-      if (-not $pbiSettingDone) {
-        # Try to enable the setting via PATCH
-        $patchBody = @{
-          tenantSettings = @(
-            @{
-              settingName        = "ServicePrincipalAccess"
-              enabled            = $true
-              tenantSettingGroup = "Developer"
-              properties         = @(
-                @{
-                  name  = "SecurityGroupIds"
-                  value = $pbiSecGroupId
-                }
-              )
-            }
-          )
-        } | ConvertTo-Json -Depth 5
-
-        try {
-          Invoke-RestMethod -Method PATCH `
-            -Uri "https://api.powerbi.com/v1.0/myorg/admin/tenantSettings" `
-            -Headers $pbiHeaders -Body $patchBody -ErrorAction Stop | Out-Null
-          Write-Ok "Enabled 'Allow service principals to use Power BI APIs' with group $pbiSecGroupName"
-          $pbiSettingDone = $true
-        } catch {
-          Write-Info "  Could not enable PBI setting via API: $($_.Exception.Message.Split([char]10)[0].Trim())"
-        }
-      }
     }
   } catch {
-    Write-Info "  Could not get Power BI API token: $($_.Exception.Message.Split([char]10)[0].Trim())"
+    Write-Info "  Could not get Fabric API token: $($_.Exception.Message.Split([char]10)[0].Trim())"
   }
 }
 
 if (-not $pbiSettingDone) {
-  Write-Warn "Manual step required for Power BI Section 9 checks:"
+  Write-Warn "Manual step required for Power BI / Fabric Section 9 checks:"
   Write-Host "  1. Go to: https://app.powerbi.com/admin-portal/tenantSettings?experience=power-bi" -ForegroundColor Yellow
-  Write-Host "  2. Under 'Developer settings', find 'Allow service principals to use Power BI APIs'" -ForegroundColor Yellow
-  Write-Host "  3. Set it to ENABLED" -ForegroundColor Yellow
+  Write-Host "  2. Under 'Admin API settings', enable 'Service principals can access read-only admin APIs'" -ForegroundColor Yellow
   if ($pbiSecGroupId) {
-    Write-Host "  4. Under 'Apply to:', select 'Specific security groups' and add:" -ForegroundColor Yellow
+    Write-Host "  3. Under 'Apply to:', select 'Specific security groups' and add:" -ForegroundColor Yellow
     Write-Host "     Group: $pbiSecGroupName" -ForegroundColor Cyan
   } else {
-    Write-Host "  4. Under 'Apply to:', add a security group containing the service principal" -ForegroundColor Yellow
+    Write-Host "  3. Under 'Apply to:', add a security group containing the service principal" -ForegroundColor Yellow
   }
+  Write-Host "  4. Under 'Developer settings', review the service-principal settings used by CIS 9.1.10-9.1.12:" -ForegroundColor Yellow
+  Write-Host "     - Service principals can call Fabric public APIs" -ForegroundColor Yellow
+  Write-Host "     - Allow service principals to create and use profiles" -ForegroundColor Yellow
+  Write-Host "     - Service principals can create workspaces, connections, and deployment pipelines" -ForegroundColor Yellow
   Write-Host ""
   Wait-ManualStep
 } else {
@@ -954,9 +1004,9 @@ if ($grantedRoles.Count -gt 0) {
 
   # Power BI API access check
   if (-not $pbiSettingDone) {
-    Write-Host "    [!!] 'Allow service principals to use Power BI APIs' may need manual enablement (see above)" -ForegroundColor Yellow
+    Write-Host "    [!!] 'Service principals can access read-only admin APIs' may need manual enablement (see above)" -ForegroundColor Yellow
   } else {
-    Write-Host "    [OK] Allow service principals to use Power BI APIs" -ForegroundColor Green
+    Write-Host "    [OK] Service principals can access read-only admin APIs" -ForegroundColor Green
   }
   Write-Host ""
 }

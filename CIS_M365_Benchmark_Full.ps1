@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    CIS Microsoft 365 Foundations Benchmark v6.0.1 - All 85 Automated Checks
+    CIS Microsoft 365 Foundations Benchmark v6.0.1 - All 88 Automated Checks
     Version 3 - All errors from report fixed.
 
 .DESCRIPTION
@@ -22,17 +22,16 @@
       [5.3.1]  PIM: Forbidden -> clear permission WARN.
       [5.3.3]  Access reviews: Forbidden -> clear permission WARN.
       [5.3.4]  PIM approval: removed bad API call, manual WARN only.
-      [Sec 9]  Power BI: tries PBI-specific OAuth token first (scope: analysis.windows.net),
-               falls back to Graph beta endpoint, clear WARN with permission instructions.
+    [Sec 9]  Power BI / Fabric: reads tenant settings from the Fabric Admin API
+           and prints current Fabric admin-setting guidance on failure.
 
     Fix log vs v3:
       [EXO]    All EXO pipeline results wrapped in @() to prevent '.Count' errors on
                deserialized objects (affects 1.2.2, 1.3.3, 2.1.3, 2.1.6, 2.1.9, 2.1.14,
                6.1.3, 6.2.1, 6.2.2). PowerShell deserialized EXO objects may not expose
                .Count when the result is $null or a single object.
-      [Sec 9]  Power BI: removed false 'not provisioned' assumption on 404; improved
-               diagnostics to mention 'Allow service principals to use Power BI APIs'
-               tenant setting, Power BI Admin role, and Tenant.Read.All permission.
+    [Sec 9]  Power BI / Fabric: replaced stale tenantSettings / Graph beta logic
+           with current Fabric Admin API guidance and Fabric Administrator role.
       [Summary]Missing permissions section is now dynamic - checks actual token scopes
                instead of always showing a hardcoded list.
 
@@ -55,13 +54,13 @@
           PrivilegedAccess.Read.AzureAD,      <- Section 5.3.x (requires Entra P2)
           AccessReview.Read.All,              <- Section 5.3.3 (requires Entra P2)
           InformationProtectionPolicy.Read.All,
-          Tenant.Read.All,                    <- Section 9.x (Power BI via Graph beta)
+          Tenant.Read.All,                    <- Section 9.x (Power BI / Fabric admin settings)
           SecurityEvents.Read.All, IdentityRiskyUser.Read.All
         Exchange Online (for app-only EXO, avoids interactive login):
           Exchange.ManageAsApp
 
     Required Entra ID role assignments on the Service Principal:
-      - Power BI Administrator  -> for Section 9 (Power BI tenant settings)
+    - Fabric Administrator / Power BI Administrator -> for Section 9 (Fabric tenant settings)
       - Intune Administrator    -> for Section 4 (Device Management)  [requires Intune license]
 
     For app-only EXO: also assign SP to "View-Only Organization Management"
@@ -2100,27 +2099,57 @@ function Check-8_5_9 {
 }
 
 # ===============================================================================
-#  SECTION 9 - Power BI
-#  FIX: Use Power BI-specific OAuth token (scope: analysis.windows.net), fall back
-#       to Graph beta endpoint.
-#       - Power BI REST API requires 'Tenant.Read.All' on Power BI Service.
-#       - Graph beta fallback uses existing Graph admin permissions (no extra scope needed).
+#  SECTION 9 - Power BI / Fabric
+#  Uses the Fabric Admin API for tenant settings.
+#    - Requires 'Tenant.Read.All' on Power BI Service.
+#    - Requires a Fabric Administrator / Power BI Administrator directory role.
+#    - Requires Fabric tenant setting 'Service principals can access read-only admin APIs'.
 # ===============================================================================
 
 $Script:PBIToken = $null
 $Script:PBIChecked = $false
+
+function Get-AzCliFabricAccessToken {
+    if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+        return $null
+    }
+
+    try {
+        $prevEap = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $token = & az account get-access-token --resource https://api.fabric.microsoft.com --query accessToken -o tsv 2>&1
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+
+        if ($LASTEXITCODE -ne 0) {
+            return $null
+        }
+
+        $textLines = $token | Where-Object { $_ -is [string] }
+        $text = ($textLines | Out-String).Trim()
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            return $null
+        }
+
+        return $text
+    } catch {
+        return $null
+    }
+}
 
 function Get-PBITenantSettings {
     if (-not $Script:PBIChecked) {
         $Script:PBIChecked = $true
         $Script:PBIError   = $null
 
-        # Try 1: Power BI REST API with its own OAuth scope
+        # Fabric Admin API (current supported tenant settings endpoint)
         try {
             $PBITokenBody = @{
                 client_id     = $AppId
                 client_secret = $AppSecret
-                scope         = "https://analysis.windows.net/powerbi/api/.default"
+                scope         = "https://api.fabric.microsoft.com/.default"
                 grant_type    = "client_credentials"
             }
             $tok = (Invoke-RestMethod -Method POST `
@@ -2128,37 +2157,70 @@ function Get-PBITenantSettings {
                 -Body $PBITokenBody -EA Stop).access_token
             $Headers  = @{ Authorization = "Bearer $tok" }
             $Response = Invoke-RestMethod -Method GET `
-                -Uri "https://api.powerbi.com/v1.0/myorg/admin/tenantSettings" `
+                -Uri "https://api.fabric.microsoft.com/v1/admin/tenantsettings" `
                 -Headers $Headers -EA Stop
-            $Script:PBIToken = $Response.tenantSettings
-            Write-Host "    [OK] Power BI API connected (PBI OAuth token)" -ForegroundColor Green
-            return
-        } catch {
-            $Script:PBIError = "PBI API: $($_.Exception.Message.Split([char]10)[0].Trim())"
-        }
-
-        # Try 2: Graph beta endpoint
-        try {
-            $Response = Invoke-MgGraphRequest -Method GET `
-                -Uri "https://graph.microsoft.com/beta/admin/powerBI/tenantSettings" -EA Stop
-
-            if ($null -ne $Response.tenantSettings) {
-                $Script:PBIToken = $Response.tenantSettings
-            } elseif ($null -ne $Response.value) {
+            if ($null -ne $Response.value) {
                 $Script:PBIToken = $Response.value
-            } elseif ($null -ne $Response.settings) {
-                $Script:PBIToken = $Response.settings
             } else {
                 $Script:PBIToken = $Response
             }
-            Write-Host "    [OK] Power BI connected (Graph beta)" -ForegroundColor Green
-            return
+            Write-Host "    [OK] Fabric Admin API connected" -ForegroundColor Green
+            return $Script:PBIToken
         } catch {
-            $Script:PBIError += " | Graph beta: $($_.Exception.Message.Split([char]10)[0].Trim())"
+            $Script:PBIError = "Fabric API: $($_.Exception.Message.Split([char]10)[0].Trim())"
+            $Script:PBIToken = $null
+        }
+
+        # Fallback: delegated Azure CLI token (works when app-only Fabric admin tenantSettings returns 500)
+        try {
+            $azToken = Get-AzCliFabricAccessToken
+            if ($azToken) {
+                $Headers = @{ Authorization = "Bearer $azToken" }
+                $Response = Invoke-RestMethod -Method GET `
+                    -Uri "https://api.fabric.microsoft.com/v1/admin/tenantsettings" `
+                    -Headers $Headers -EA Stop
+                if ($null -ne $Response.value) {
+                    $Script:PBIToken = $Response.value
+                } else {
+                    $Script:PBIToken = $Response
+                }
+                Write-Host "    [OK] Fabric Admin API connected (Azure CLI delegated token)" -ForegroundColor Green
+                return $Script:PBIToken
+            }
+        } catch {
+            $Script:PBIError += " | Azure CLI delegated Fabric API: $($_.Exception.Message.Split([char]10)[0].Trim())"
             $Script:PBIToken = $null
         }
     }
     return $Script:PBIToken
+}
+
+function Get-PBISettingCandidates {
+    param([string]$SettingName)
+
+    switch ($SettingName) {
+        "AllowGuestAccess" {
+            return @("AllowGuestAccess", "AllowGuestUserToAccessSharedContent", "ElevatedGuestsTenant")
+        }
+        "AllowRVisuals" {
+            return @("AllowRVisuals", "RScriptVisual")
+        }
+        "SensitivityLabelsEnabled" {
+            return @("SensitivityLabelsEnabled", "EimInformationProtectionEdit")
+        }
+        "ServicePrincipalAccess" {
+            return @("ServicePrincipalAccess", "ServicePrincipalAccessPermissionAPIs")
+        }
+        "ServicePrincipalProfiles" {
+            return @("ServicePrincipalProfiles", "AllowServicePrincipalsCreateAndUseProfiles")
+        }
+        "ServicePrincipalCanManageWorkspaces" {
+            return @("ServicePrincipalCanManageWorkspaces", "ServicePrincipalAccessGlobalAPIs")
+        }
+        default {
+            return @($SettingName)
+        }
+    }
 }
 
 function Check-9_PBI {
@@ -2166,33 +2228,53 @@ function Check-9_PBI {
     Invoke-Check $Section $Title {
         $Settings = Get-PBITenantSettings
         if ($null -eq $Settings) {
-            Write-Warn "Power BI admin settings not accessible."
+            Write-Warn "Power BI / Fabric admin settings not accessible."
             if ($Script:PBIError) {
                 Write-Info "  Actual errors encountered:"
                 Write-Info "    $($Script:PBIError)"
             }
             Write-Info "  Likely causes (check all):"
             Write-Info "    1. Power BI Service > Tenant.Read.All (Application) permission + admin consent"
-            Write-Info "    2. Service principal must be assigned the 'Power BI Administrator' (or 'Fabric Administrator') Entra ID role"
-            Write-Info "       Entra ID > Roles and administrators > Power BI Administrator > Add assignments"
+            Write-Info "    2. Service principal must be assigned the 'Fabric Administrator' (or 'Power BI Administrator') Entra ID role"
+            Write-Info "       Entra ID > Roles and administrators > Fabric Administrator > Add assignments"
             Write-Info "       -> search for your App Registration name and assign it"
-            Write-Info "    3. Power BI Admin portal > Tenant settings > Developer settings >"
-            Write-Info "       'Allow service principals to use Power BI APIs' must be ENABLED"
+            Write-Info "    3. Fabric Admin portal > Tenant settings > Admin API settings >"
+            Write-Info "       'Service principals can access read-only admin APIs' must be ENABLED"
             Write-Info "       (add the service principal or its security group to the allowed list)"
-            Write-Info "    4. If Power BI is truly not licensed/provisioned, all Section 9 checks are N/A"
+            Write-Info "    4. For 9.1.10-9.1.12, also review current Developer settings for service principals"
+            Write-Info "    5. If app-only Fabric admin tenant settings still return 500, sign in with Azure CLI"
+            Write-Info "       and rerun the benchmark so it can use the delegated Fabric fallback"
             Write-Info "  Manual check: app.powerbi.com > Admin portal > Tenant settings > $SettingName"
-            Add-Result $Section $Title "WARN" "Power BI inaccessible - check Tenant.Read.All + Power BI Admin role + 'Allow service principals to use Power BI APIs'."
+            Add-Result $Section $Title "WARN" "Power BI/Fabric inaccessible - check Tenant.Read.All + Fabric Administrator + 'Service principals can access read-only admin APIs'."
             return
         }
-        # Handle both endpoint response shapes
-        $Setting = $Settings | Where-Object { $_.settingName -eq $SettingName -or $_.name -eq $SettingName }
-        if ($null -eq $Setting) {
-            Write-Warn "Setting '$SettingName' not found in response. May have a different name."
+        $CandidateNames = Get-PBISettingCandidates -SettingName $SettingName
+        $MatchedSettings = @($Settings | Where-Object {
+            ($_.PSObject.Properties['settingName'] -and $_.settingName -in $CandidateNames) -or
+            ($_.PSObject.Properties['name'] -and $_.name -in $CandidateNames)
+        })
+        if ($MatchedSettings.Count -eq 0) {
+            Write-Warn "Setting '$SettingName' not found in Fabric tenant settings response."
             Add-Result $Section $Title "WARN" "Setting '$SettingName' not found."
             return
         }
-        $IsEnabled = ($Setting.enabled -eq $true) -or ($Setting.value -eq $true)
-        Write-Info "$SettingName : enabled=$IsEnabled"
+        $IsEnabled = $false
+        foreach ($MatchedSetting in $MatchedSettings) {
+            $hasEnabled = $MatchedSetting.PSObject.Properties['enabled'] -and $MatchedSetting.enabled -eq $true
+            $hasValue   = $MatchedSetting.PSObject.Properties['value'] -and $MatchedSetting.value -eq $true
+            if ($hasEnabled -or $hasValue) {
+                $IsEnabled = $true
+                break
+            }
+        }
+        $ResolvedNames = ($MatchedSettings | ForEach-Object {
+            if ($_.PSObject.Properties['settingName'] -and $_.settingName) {
+                $_.settingName
+            } elseif ($_.PSObject.Properties['name'] -and $_.name) {
+                $_.name
+            }
+        } | Select-Object -Unique) -join ", "
+        Write-Info "$SettingName : enabled=$IsEnabled (matched: $ResolvedNames)"
         if ($IsEnabled -eq $ExpectedEnabled) {
             Write-Pass "$SettingName is set correctly (enabled = $IsEnabled)."
             Add-Result $Section $Title "PASS" "$SettingName = $IsEnabled."
@@ -2279,7 +2361,7 @@ function Show-Summary {
     # Power BI Service permission (separate API, not in Graph scopes)
     $hasPBIWarn = $Script:Results | Where-Object { $_.Section -like "9.1*" -and $_.Status -eq "WARN" }
     if ($hasPBIWarn) {
-        $MissingPerms += @{ Scope = "Tenant.Read.All (Power BI Service)"; Desc = "for Power BI checks (9.x) + Power BI Admin role + 'Allow service principals to use Power BI APIs'" }
+        $MissingPerms += @{ Scope = "Tenant.Read.All (Power BI Service)"; Desc = "for Power BI / Fabric checks (9.x) + Fabric Administrator + 'Service principals can access read-only admin APIs'" }
     }
     if ($MissingPerms.Count -gt 0) {
         Write-Host "  Missing or ineffective App Registration permissions:" -ForegroundColor Yellow
@@ -2309,7 +2391,7 @@ Clear-Host
 
 Write-Host ""
 Write-Host "+==================================================================================+" -ForegroundColor Cyan
-Write-Host "|   CIS Microsoft 365 Foundations Benchmark v6.0.1 - 85 Automated Checks           |" -ForegroundColor Cyan
+Write-Host "|   CIS Microsoft 365 Foundations Benchmark v6.0.1 - 88 Automated Checks           |" -ForegroundColor Cyan
 Write-Host "|   Tenant : $TenantId                          |" -ForegroundColor Cyan
 Write-Host "+==================================================================================+" -ForegroundColor Cyan
 
@@ -2357,7 +2439,7 @@ Check-8_1_1;  Check-8_1_2
 Check-8_2_1;  Check-8_2_2;  Check-8_2_3;  Check-8_2_4
 Check-8_5_2;  Check-8_5_7;  Check-8_5_8;  Check-8_5_9
 
-Write-Banner "SECTION 9 - Power BI"
+Write-Banner "SECTION 9 - Power BI / Fabric"
 Check-9_1_1;  Check-9_1_4;  Check-9_1_5;  Check-9_1_6
 Check-9_1_7;  Check-9_1_10; Check-9_1_11; Check-9_1_12
 
