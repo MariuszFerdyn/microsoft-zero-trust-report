@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    CIS Microsoft 365 Foundations Benchmark v6.0.1 - All 88 Automated Checks
+    CIS Microsoft 365 Foundations Benchmark v6.0.1 - All 129 Automated Checks
     Version 3 - All errors from report fixed.
 
 .DESCRIPTION
@@ -55,7 +55,8 @@
           AccessReview.Read.All,              <- Section 5.3.3 (requires Entra P2)
           InformationProtectionPolicy.Read.All,
           Tenant.Read.All,                    <- Section 9.x (Power BI / Fabric admin settings)
-          SecurityEvents.Read.All, IdentityRiskyUser.Read.All
+          SecurityEvents.Read.All, IdentityRiskyUser.Read.All,
+          UserAuthenticationMethod.Read.All  <- Section 5.2.3.4 (MFA registration)
         Exchange Online (for app-only EXO, avoids interactive login):
           Exchange.ManageAsApp
 
@@ -981,15 +982,202 @@ function Check-2_1_15 {
     }
 }
 
+function Check-2_1_1 {
+    Invoke-Check "2.1.1 (L2)" "Ensure Safe Links for Office Applications is Enabled (Automated)" {
+        if (-not (Assert-Exo)) { Add-Result "2.1.1" "Safe Links for Office Apps" "WARN" "EXO not connected."; return }
+        $Policies = @(Get-SafeLinksPolicy -EA Stop)
+        $OK = @($Policies | Where-Object {
+            $_.EnableSafeLinksForEmail -and $_.EnableSafeLinksForTeams -and $_.EnableSafeLinksForOffice -and
+            $_.TrackClicks -and $_.ScanUrls -and (-not $_.AllowClickThrough)
+        })
+        if ($OK.Count -gt 0) {
+            Write-Pass "Safe Links policy fully configured for Office applications."
+            $OK | ForEach-Object { Write-Info "  -> $($_.Name)" }
+            Add-Result "2.1.1" "Safe Links for Office Apps" "PASS" "Safe Links configured."
+        } else {
+            Write-Fail "No Safe Links policy has all recommended settings."
+            Write-Info "  Remediation: Defender portal > Policies > Safe Links > Enable for Email, Teams, Office + Track clicks + Block click-through"
+            Add-Result "2.1.1" "Safe Links for Office Apps" "FAIL" "Safe Links not fully configured."
+        }
+    }
+}
+
+function Check-2_1_4 {
+    Invoke-Check "2.1.4 (L2)" "Ensure Safe Attachments policy is enabled (Automated)" {
+        if (-not (Assert-Exo)) { Add-Result "2.1.4" "Safe Attachments policy" "WARN" "EXO not connected."; return }
+        $Policies = @(Get-SafeAttachmentPolicy -EA Stop)
+        $OK = @($Policies | Where-Object { $_.Enable -and $_.Action -ne "Allow" })
+        if ($OK.Count -gt 0) {
+            Write-Pass "Safe Attachments policy enabled with blocking action."
+            $OK | ForEach-Object { Write-Info "  -> $($_.Name): Action=$($_.Action)" }
+            Add-Result "2.1.4" "Safe Attachments policy" "PASS" "Safe Attachments enabled."
+        } else {
+            Write-Fail "No Safe Attachments policy enabled with a blocking action."
+            Write-Info "  Remediation: Defender portal > Policies > Safe Attachments > Create/Edit > Enable + Action = Block/Replace/DynamicDelivery"
+            Add-Result "2.1.4" "Safe Attachments policy" "FAIL" "Safe Attachments not configured."
+        }
+    }
+}
+
+function Check-2_1_7 {
+    Invoke-Check "2.1.7 (L2)" "Ensure that an anti-phishing policy has been created (Automated)" {
+        if (-not (Assert-Exo)) { Add-Result "2.1.7" "Anti-phishing policy" "WARN" "EXO not connected."; return }
+        $Policies = @(Get-AntiPhishPolicy -EA Stop | Where-Object { $_.Identity -ne "Office365 AntiPhish Default" })
+        $OK = @($Policies | Where-Object {
+            $_.Enabled -and $_.EnableMailboxIntelligenceProtection -and $_.PhishThresholdLevel -ge 2
+        })
+        if ($OK.Count -gt 0) {
+            Write-Pass "$($OK.Count) custom anti-phishing policy/policies configured."
+            $OK | ForEach-Object { Write-Info "  -> $($_.Name): PhishThreshold=$($_.PhishThresholdLevel)" }
+            Add-Result "2.1.7" "Anti-phishing policy" "PASS" "$($OK.Count) anti-phish policies found."
+        } else {
+            Write-Fail "No custom anti-phishing policy with recommended settings found."
+            Write-Info "  Remediation: Defender portal > Anti-phishing > Create policy > Enable mailbox intelligence + threshold >= 2 (Aggressive)"
+            Add-Result "2.1.7" "Anti-phishing policy" "FAIL" "No compliant anti-phishing policy."
+        }
+    }
+}
+
+function Check-2_1_11 {
+    Invoke-Check "2.1.11 (L2)" "Ensure comprehensive attachment filtering is applied (Automated)" {
+        if (-not (Assert-Exo)) { Add-Result "2.1.11" "Comprehensive attachment filter" "WARN" "EXO not connected."; return }
+        $Policy = Get-MalwareFilterPolicy -Identity Default -EA Stop
+        $CISTypes = @("ace","ani","app","cab","docm","exe","iso","jar","jnlp","rar","scr","vbe","vbs","wsc","wsf","wsh")
+        $BlockedTypes = @($Policy.FileTypes | ForEach-Object { $_.ToLower() })
+        $Missing = @($CISTypes | Where-Object { $_ -notin $BlockedTypes })
+        Write-Info "Blocked file types: $($BlockedTypes.Count)"
+        if ($Missing.Count -eq 0) {
+            Write-Pass "All CIS-recommended file types are blocked."
+            Add-Result "2.1.11" "Comprehensive attachment filter" "PASS" "All recommended types blocked."
+        } else {
+            Write-Fail "$($Missing.Count) CIS-recommended file types NOT blocked: $($Missing -join ', ')"
+            Write-Info "  Remediation: Defender portal > Anti-malware > Default > File types filter > add missing types"
+            Add-Result "2.1.11" "Comprehensive attachment filter" "FAIL" "Missing types: $($Missing -join ', ')"
+        }
+    }
+}
+
+function Check-2_1_12 {
+    Invoke-Check "2.1.12 (L1)" "Ensure the connection filter IP allow list is not used (Automated)" {
+        if (-not (Assert-Exo)) { Add-Result "2.1.12" "Connection filter IP allow" "WARN" "EXO not connected."; return }
+        $Policy = Get-HostedConnectionFilterPolicy -Identity Default -EA Stop
+        $IPAllowList = @($Policy.IPAllowList)
+        Write-Info "IPAllowList entries: $($IPAllowList.Count)"
+        if ($IPAllowList.Count -eq 0) {
+            Write-Pass "Connection filter IP allow list is empty."
+            Add-Result "2.1.12" "Connection filter IP allow" "PASS" "IPAllowList is empty."
+        } else {
+            Write-Fail "Connection filter IP allow list contains $($IPAllowList.Count) entries."
+            $IPAllowList | ForEach-Object { Write-Info "  -> $_" }
+            Write-Info "  Remediation: Defender portal > Anti-spam > Connection filter policy > IP allow list > Remove all entries"
+            Add-Result "2.1.12" "Connection filter IP allow" "FAIL" "$($IPAllowList.Count) IPs in allow list."
+        }
+    }
+}
+
+function Check-2_4_1 {
+    Invoke-Check "2.4.1 (L1)" "Ensure Priority account protection is enabled and configured (Automated)" {
+        if (-not (Assert-Exo)) { Add-Result "2.4.1" "Priority account protection" "WARN" "EXO not connected."; return }
+        try {
+            $Rules = @(Get-EOPProtectionPolicyRule -EA Stop | Where-Object { $_.Priority -ne $null })
+            $StrictRule = $Rules | Where-Object { $_.Identity -like "*Strict*" }
+            $StandardRule = $Rules | Where-Object { $_.Identity -like "*Standard*" }
+            if ($StrictRule -or $StandardRule) {
+                Write-Pass "Preset security policy rules found for priority accounts."
+                $Rules | ForEach-Object { Write-Info "  -> $($_.Identity): State=$($_.State)" }
+                Add-Result "2.4.1" "Priority account protection" "PASS" "Preset policies configured."
+            } else {
+                Write-Warn "No preset security policy rules found. Verify priority account tags are configured."
+                Write-Info "  Remediation: Defender portal > Settings > Email & collaboration > User tags > Priority account"
+                Add-Result "2.4.1" "Priority account protection" "WARN" "No preset policies found."
+            }
+        } catch {
+            Write-Warn "Cannot check priority account protection: $($_.Exception.Message)"
+            Write-Info "  Manual check: Defender portal > Settings > User tags > Priority account"
+            Add-Result "2.4.1" "Priority account protection" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Check-2_4_2 {
+    Invoke-Check "2.4.2 (L1)" "Ensure Priority accounts have 'Strict protection' presets applied (Automated)" {
+        if (-not (Assert-Exo)) { Add-Result "2.4.2" "Strict protection presets" "WARN" "EXO not connected."; return }
+        try {
+            $Rules = @(Get-ATPProtectionPolicyRule -EA Stop)
+            $Strict = @($Rules | Where-Object { $_.Identity -like "*Strict*" -and $_.State -eq "Enabled" })
+            if ($Strict.Count -gt 0) {
+                Write-Pass "Strict ATP protection preset is enabled."
+                $Strict | ForEach-Object { Write-Info "  -> $($_.Identity): SentTo=$($_.SentTo -join ', ')" }
+                Add-Result "2.4.2" "Strict protection presets" "PASS" "Strict preset enabled."
+            } else {
+                Write-Fail "No Strict ATP protection preset rule is enabled."
+                Write-Info "  Remediation: Defender portal > Policies > Preset security policies > Strict protection > Enable and assign to priority accounts"
+                Add-Result "2.4.2" "Strict protection presets" "FAIL" "Strict preset not enabled."
+            }
+        } catch {
+            Write-Warn "Cannot check ATP preset rules: $($_.Exception.Message)"
+            Write-Info "  Manual check: Defender portal > Policies > Preset security policies"
+            Add-Result "2.4.2" "Strict protection presets" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Check-2_4_4 {
+    Invoke-Check "2.4.4 (L1)" "Ensure Zero-hour auto purge for Microsoft Teams is on (Automated)" {
+        if (-not (Assert-Exo)) { Add-Result "2.4.4" "ZAP for Teams" "WARN" "EXO not connected."; return }
+        try {
+            $Policy = Get-TeamsProtectionPolicy -EA Stop
+            Write-Info "ZapEnabled: $($Policy.ZapEnabled)"
+            if ($Policy.ZapEnabled -eq $true) {
+                Write-Pass "Zero-hour auto purge for Teams is ENABLED."
+                Add-Result "2.4.4" "ZAP for Teams" "PASS" "ZapEnabled = True."
+            } else {
+                Write-Fail "Zero-hour auto purge for Teams is NOT enabled."
+                Write-Info "  Remediation: Defender portal > Settings > Email & collaboration > Microsoft Teams protection > ZAP = On"
+                Add-Result "2.4.4" "ZAP for Teams" "FAIL" "ZapEnabled = False."
+            }
+        } catch {
+            Write-Warn "Cannot check Teams ZAP: $($_.Exception.Message)"
+            Write-Info "  Manual check: Defender portal > Settings > Microsoft Teams protection"
+            Add-Result "2.4.4" "ZAP for Teams" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
 # ===============================================================================
 #  SECTION 3 - Compliance
 # ===============================================================================
+function Check-3_1_1 {
+    Invoke-Check "3.1.1 (L1)" "Ensure Microsoft 365 audit log search is Enabled (Automated)" {
+        if (-not (Assert-Exo)) { Add-Result "3.1.1" "Audit log search enabled" "WARN" "EXO not connected."; return }
+        $Cfg = Get-AdminAuditLogConfig -EA Stop
+        Write-Info "UnifiedAuditLogIngestionEnabled: $($Cfg.UnifiedAuditLogIngestionEnabled)"
+        if ($Cfg.UnifiedAuditLogIngestionEnabled -eq $true) {
+            Write-Pass "Unified audit log ingestion is ENABLED."
+            Add-Result "3.1.1" "Audit log search enabled" "PASS" "UnifiedAuditLog = True."
+        } else {
+            Write-Fail "Unified audit log ingestion is NOT enabled."
+            Write-Info "  Remediation: Microsoft Purview > Audit > Start recording user and admin activity"
+            Add-Result "3.1.1" "Audit log search enabled" "FAIL" "UnifiedAuditLog = False."
+        }
+    }
+}
+
 function Check-3_2_1 {
     Invoke-Check "3.2.1 (L1)" "Ensure DLP policies are enabled (Automated)" {
         Write-Warn "DLP policy check is not currently automated in this script."
         Write-Info "  Manual check: Microsoft Purview > Data loss prevention > Policies"
         Write-Info "  Compliant: At least one enabled policy covering Exchange, SharePoint, OneDrive, Teams."
         Add-Result "3.2.1" "DLP policies enabled" "WARN" "Manual verification required (Purview DLP policies not queried here)."
+    }
+}
+
+function Check-3_2_2 {
+    Invoke-Check "3.2.2 (L1)" "Ensure DLP policies are enabled for Microsoft Teams (Automated)" {
+        Write-Warn "DLP policy for Teams check requires Security & Compliance PowerShell."
+        Write-Info "  Manual check: Microsoft Purview > Data loss prevention > Policies"
+        Write-Info "  Compliant: At least one enabled DLP policy covers 'Teams chat and channel messages' location."
+        Add-Result "3.2.2" "DLP policies for Teams" "WARN" "Manual verification required (Purview DLP policies not queried here)."
     }
 }
 
@@ -1097,6 +1285,57 @@ function Check-4_2 {
 #  SECTION 5 - Microsoft Entra ID
 # ===============================================================================
 
+function Check-5_1_3_1 {
+    Invoke-Check "5.1.3.1 (L1)" "Ensure a dynamic group for guest users is created (Automated)" {
+        $DynGroups = @(Get-MgGroup -All -Property DisplayName,GroupTypes,MembershipRule -EA Stop |
+            Where-Object {
+                $_.GroupTypes -contains "DynamicMembership" -and
+                $_.MembershipRule -match "userType.*Guest"
+            })
+        if ($DynGroups.Count -gt 0) {
+            Write-Pass "$($DynGroups.Count) dynamic group(s) targeting guest users found."
+            $DynGroups | ForEach-Object { Write-Info "  -> $($_.DisplayName): $($_.MembershipRule)" }
+            Add-Result "5.1.3.1" "Dynamic group for guests" "PASS" "$($DynGroups.Count) dynamic guest groups."
+        } else {
+            Write-Fail "No dynamic group targeting guest users found."
+            Write-Info "  Remediation: Entra ID > Groups > New group > Membership type = Dynamic User > Rule: (user.userType -eq 'Guest')"
+            Add-Result "5.1.3.1" "Dynamic group for guests" "FAIL" "No dynamic guest group."
+        }
+    }
+}
+
+function Check-5_1_3_2 {
+    Invoke-Check "5.1.3.2 (L1)" "Ensure users cannot create security groups (Automated)" {
+        $Uri      = "https://graph.microsoft.com/beta/settings"
+        $Response = Invoke-MgGraphRequest -Method GET -Uri $Uri -EA Stop
+        $GroupSetting = $Response.value | Where-Object { $_.displayName -eq "Group.Unified" }
+        if ($GroupSetting) {
+            $EnableGroupCreation = ($GroupSetting.values | Where-Object { $_.name -eq "EnableGroupCreation" }).value
+            Write-Info "EnableGroupCreation: $EnableGroupCreation"
+            if ($EnableGroupCreation -eq "false") {
+                Write-Pass "Users are restricted from creating security groups."
+                Add-Result "5.1.3.2" "Restrict security group creation" "PASS" "EnableGroupCreation = false."
+            } else {
+                Write-Fail "Users CAN create groups (EnableGroupCreation = $EnableGroupCreation)."
+                Write-Info "  Remediation: Entra ID > Groups > General > Users can create security groups in Azure portals, API or PowerShell = No"
+                Add-Result "5.1.3.2" "Restrict security group creation" "FAIL" "EnableGroupCreation = $EnableGroupCreation."
+            }
+        } else {
+            $AuthPol = Get-MgPolicyAuthorizationPolicy -EA Stop
+            $CanCreate = $AuthPol.DefaultUserRolePermissions.AllowedToCreateSecurityGroups
+            Write-Info "AllowedToCreateSecurityGroups: $CanCreate"
+            if ($CanCreate -eq $false) {
+                Write-Pass "Users restricted from creating security groups."
+                Add-Result "5.1.3.2" "Restrict security group creation" "PASS" "AllowedToCreateSecurityGroups = False."
+            } else {
+                Write-Fail "Users CAN create security groups."
+                Write-Info "  Remediation: Entra ID > Groups > General > Restrict security group creation = No"
+                Add-Result "5.1.3.2" "Restrict security group creation" "FAIL" "AllowedToCreateSecurityGroups = True."
+            }
+        }
+    }
+}
+
 function Check-5_1_2_1 {
     Invoke-Check "5.1.2.1 (L1)" "Ensure 'Per-user MFA' is disabled (Automated)" {
         $AllUsers = Get-MgUser -All -Property Id,UserPrincipalName,DisplayName -EA Stop |
@@ -1151,6 +1390,27 @@ function Check-5_1_2_3 {
             Write-Fail "Non-admin users CAN create tenants."
             Write-Info "  Remediation: Entra ID > User settings > Restrict non-admin users from creating tenants = Yes"
             Add-Result "5.1.2.3" "Restrict tenant creation" "FAIL" "AllowedToCreateTenants = True."
+        }
+    }
+}
+
+function Check-5_1_4_1 {
+    Invoke-Check "5.1.4.1 (L2)" "Ensure the ability to join devices to Entra is restricted (Automated)" {
+        $Uri    = "https://graph.microsoft.com/beta/policies/deviceRegistrationPolicy"
+        $Policy = Invoke-MgGraphRequest -Method GET -Uri $Uri -EA Stop
+        $JoinType = $Policy.azureADJoin.allowedToJoin.'@odata.type'
+        Write-Info "azureADJoin.allowedToJoin type: $JoinType"
+        $Compliant = @(
+            "#microsoft.graph.enumeratedDeviceRegistrationMembership",
+            "#microsoft.graph.noDeviceRegistrationMembership"
+        )
+        if ($JoinType -in $Compliant) {
+            Write-Pass "Device join to Entra is restricted (type = $JoinType)."
+            Add-Result "5.1.4.1" "Restrict Entra device join" "PASS" "Join type = $JoinType."
+        } else {
+            Write-Fail "All users can join devices to Entra (type = $JoinType)."
+            Write-Info "  Remediation: Entra ID > Devices > Device settings > Users may join devices to Microsoft Entra = Selected"
+            Add-Result "5.1.4.1" "Restrict Entra device join" "FAIL" "Join type = $JoinType."
         }
     }
 }
@@ -1263,6 +1523,27 @@ function Check-5_1_5_1 {
     }
 }
 
+function Check-5_1_5_2 {
+    Invoke-Check "5.1.5.2 (L1)" "Ensure the admin consent workflow is enabled (Automated)" {
+        try {
+            $Uri      = "https://graph.microsoft.com/v1.0/policies/adminConsentRequestPolicy"
+            $Response = Invoke-MgGraphRequest -Method GET -Uri $Uri -EA Stop
+            Write-Info "isEnabled: $($Response.isEnabled)"
+            if ($Response.isEnabled -eq $true) {
+                Write-Pass "Admin consent workflow is ENABLED."
+                Add-Result "5.1.5.2" "Admin consent workflow" "PASS" "isEnabled = True."
+            } else {
+                Write-Fail "Admin consent workflow is NOT enabled."
+                Write-Info "  Remediation: Entra ID > Enterprise Apps > Consent and permissions > Admin consent settings > Enable admin consent requests = Yes"
+                Add-Result "5.1.5.2" "Admin consent workflow" "FAIL" "isEnabled = False."
+            }
+        } catch {
+            Write-Warn "Cannot check admin consent workflow: $($_.Exception.Message)"
+            Add-Result "5.1.5.2" "Admin consent workflow" "WARN" "Error checking policy."
+        }
+    }
+}
+
 function Check-5_1_6_1 {
     Invoke-Check "5.1.6.1 (L1)" "Ensure collaboration invitations are sent to allowed domains only (Automated)" {
         try {
@@ -1289,6 +1570,30 @@ function Check-5_1_6_1 {
         } catch {
             Write-Warn "Could not check B2B policy: $($_.Exception.Message)"
             Add-Result "5.1.6.1" "B2B invitation domain restriction" "WARN" "Error checking policy."
+        }
+    }
+}
+
+function Check-5_1_6_2 {
+    Invoke-Check "5.1.6.2 (L1)" "Ensure that guest user access is restricted (Automated)" {
+        $AuthPol     = Get-MgPolicyAuthorizationPolicy -EA Stop
+        $GuestRoleId = $AuthPol.GuestUserRoleId
+        Write-Info "GuestUserRoleId: $GuestRoleId"
+        # 2af84b1e-32c8-42b7-82bc-daa82404023b = Restricted guest (most restrictive)
+        # 10dae51f-b6af-4016-8d66-8c2a99b929b3 = Limited guest
+        # a0b1b346-4d3e-4e8b-98f8-753987be4970 = Same as member (least restrictive)
+        $Restricted = "2af84b1e-32c8-42b7-82bc-daa82404023b"
+        $Limited    = "10dae51f-b6af-4016-8d66-8c2a99b929b3"
+        if ($GuestRoleId -eq $Restricted) {
+            Write-Pass "Guest access is MOST restricted (restricted guest)."
+            Add-Result "5.1.6.2" "Guest access restricted" "PASS" "Guest role = Restricted."
+        } elseif ($GuestRoleId -eq $Limited) {
+            Write-Pass "Guest access is limited."
+            Add-Result "5.1.6.2" "Guest access restricted" "PASS" "Guest role = Limited."
+        } else {
+            Write-Fail "Guest users have same access as member users."
+            Write-Info "  Remediation: Entra ID > External Identities > External collaboration settings > Guest user access = Most restrictive"
+            Add-Result "5.1.6.2" "Guest access restricted" "FAIL" "Guest role not restricted (ID=$GuestRoleId)."
         }
     }
 }
@@ -1349,6 +1654,27 @@ function Check-5_2_2_2 {
     }
 }
 
+function Check-5_2_2_3 {
+    Invoke-Check "5.2.2.3 (L1)" "Enable Conditional Access policies to block legacy authentication (Automated)" {
+        $CAPolicies = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
+        $LegacyBlock = @($CAPolicies | Where-Object {
+            $_.State -eq "enabled" -and
+            $_.GrantControls.BuiltInControls -contains "block" -and
+            ($_.Conditions.ClientAppTypes -contains "exchangeActiveSync" -or
+             $_.Conditions.ClientAppTypes -contains "other")
+        })
+        if ($LegacyBlock.Count -gt 0) {
+            Write-Pass "$($LegacyBlock.Count) CA policy/policies block legacy authentication."
+            $LegacyBlock | ForEach-Object { Write-Info "  -> $($_.DisplayName)" }
+            Add-Result "5.2.2.3" "Block legacy auth" "PASS" "Legacy auth blocked by CA."
+        } else {
+            Write-Fail "No CA policy blocks legacy authentication protocols."
+            Write-Info "  Remediation: Entra ID > Security > Conditional Access > New policy > All users > Client apps = Exchange ActiveSync, Other > Block access"
+            Add-Result "5.2.2.3" "Block legacy auth" "FAIL" "No legacy auth block CA."
+        }
+    }
+}
+
 function Check-5_2_2_4 {
     Invoke-Check "5.2.2.4 (L1)" "Ensure Sign-in frequency and non-persistent browser sessions are configured (Automated)" {
         $CAPolicies = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
@@ -1391,6 +1717,46 @@ function Check-5_2_2_5 {
             Write-Fail "No CA policy requiring phishing-resistant MFA strength for administrators."
             Write-Info "  Remediation: CA policy > Admin roles > Require authentication strength > Phishing-resistant MFA"
             Add-Result "5.2.2.5" "Phishing-resistant MFA for admins" "FAIL" "No phishing-resistant MFA CA."
+        }
+    }
+}
+
+function Check-5_2_2_6 {
+    Invoke-Check "5.2.2.6 (L1)" "Enable Identity Protection user risk policies (Automated)" {
+        $CAPolicies = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
+        $UserRiskPol = @($CAPolicies | Where-Object {
+            $_.State -eq "enabled" -and
+            ($_.Conditions.UserRiskLevels -contains "high" -or $_.Conditions.UserRiskLevels -contains "medium")
+        })
+        if ($UserRiskPol.Count -gt 0) {
+            Write-Pass "$($UserRiskPol.Count) CA policy/policies address user risk."
+            $UserRiskPol | ForEach-Object { Write-Info "  -> $($_.DisplayName): UserRisk=$($_.Conditions.UserRiskLevels -join ',')" }
+            Add-Result "5.2.2.6" "User risk policies" "PASS" "User risk CA found."
+        } else {
+            Write-Fail "No CA policy addresses medium or high user risk."
+            Write-Info "  Requires: Entra ID P2 + Identity Protection."
+            Write-Info "  Remediation: CA > User risk >= medium > require password change + MFA"
+            Add-Result "5.2.2.6" "User risk policies" "FAIL" "No user risk CA."
+        }
+    }
+}
+
+function Check-5_2_2_7 {
+    Invoke-Check "5.2.2.7 (L1)" "Enable Identity Protection sign-in risk policies (Automated)" {
+        $CAPolicies = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
+        $SignInRiskPol = @($CAPolicies | Where-Object {
+            $_.State -eq "enabled" -and
+            ($_.Conditions.SignInRiskLevels -contains "high" -or $_.Conditions.SignInRiskLevels -contains "medium")
+        })
+        if ($SignInRiskPol.Count -gt 0) {
+            Write-Pass "$($SignInRiskPol.Count) CA policy/policies address sign-in risk."
+            $SignInRiskPol | ForEach-Object { Write-Info "  -> $($_.DisplayName): SignInRisk=$($_.Conditions.SignInRiskLevels -join ',')" }
+            Add-Result "5.2.2.7" "Sign-in risk policies" "PASS" "Sign-in risk CA found."
+        } else {
+            Write-Fail "No CA policy addresses medium or high sign-in risk."
+            Write-Info "  Requires: Entra ID P2 + Identity Protection."
+            Write-Info "  Remediation: CA > Sign-in risk >= medium > Require MFA"
+            Add-Result "5.2.2.7" "Sign-in risk policies" "FAIL" "No sign-in risk CA."
         }
     }
 }
@@ -1477,6 +1843,28 @@ function Check-5_2_2_11 {
     }
 }
 
+function Check-5_2_2_12 {
+    Invoke-Check "5.2.2.12 (L1)" "Ensure the device code sign-in flow is blocked (Automated)" {
+        $CAPolicies = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
+        $DeviceCodeBlock = @($CAPolicies | Where-Object {
+            $_.State -eq "enabled" -and
+            $_.GrantControls.BuiltInControls -contains "block" -and
+            $_.Conditions.Applications.IncludeApplications -contains "All" -and
+            $null -ne $_.Conditions.AuthenticationFlows -and
+            $_.Conditions.AuthenticationFlows.TransferMethods -contains "deviceCodeFlow"
+        })
+        if ($DeviceCodeBlock.Count -gt 0) {
+            Write-Pass "$($DeviceCodeBlock.Count) CA policy/policies block device code flow."
+            $DeviceCodeBlock | ForEach-Object { Write-Info "  -> $($_.DisplayName)" }
+            Add-Result "5.2.2.12" "Block device code flow" "PASS" "Device code blocked."
+        } else {
+            Write-Fail "No CA policy blocks the device code sign-in flow."
+            Write-Info "  Remediation: CA > All cloud apps > Authentication flows > Device code flow > Block access"
+            Add-Result "5.2.2.12" "Block device code flow" "FAIL" "No device code block CA."
+        }
+    }
+}
+
 function Check-5_2_3_1 {
     Invoke-Check "5.2.3.1 (L1)" "Ensure Microsoft Authenticator is configured against MFA fatigue (Automated)" {
         $Uri      = "https://graph.microsoft.com/beta/policies/authenticationMethodsPolicy/authenticationMethodConfigurations/MicrosoftAuthenticator"
@@ -1492,6 +1880,55 @@ function Check-5_2_3_1 {
             Write-Fail "Authenticator MFA fatigue protection NOT enabled."
             Write-Info "  Remediation: Entra ID > Security > Authentication methods > Microsoft Authenticator > Configure"
             Add-Result "5.2.3.1" "Authenticator MFA fatigue protection" "FAIL" "Number match and context disabled."
+        }
+    }
+}
+
+function Check-5_2_3_2 {
+    Invoke-Check "5.2.3.2 (L1)" "Ensure custom banned passwords lists are used (Automated)" {
+        try {
+            $Uri      = "https://graph.microsoft.com/beta/settings"
+            $Response = Invoke-MgGraphRequest -Method GET -Uri $Uri -EA Stop
+            $PwdSetting = $Response.value | Where-Object { $_.displayName -eq "Password Rule Settings" }
+            if ($PwdSetting) {
+                $BannedEnabled = ($PwdSetting.values | Where-Object { $_.name -eq "EnableBannedPasswordCheck" }).value
+                $CustomList    = ($PwdSetting.values | Where-Object { $_.name -eq "BannedPasswordList" }).value
+                Write-Info "EnableBannedPasswordCheck: $BannedEnabled"
+                Write-Info "Custom banned list length: $(if($CustomList){($CustomList -split ',').Count}else{0})"
+                if ($BannedEnabled -eq "true" -and $CustomList) {
+                    Write-Pass "Custom banned password list is configured and enabled."
+                    Add-Result "5.2.3.2" "Custom banned passwords" "PASS" "Banned password check enabled with custom list."
+                } else {
+                    Write-Fail "Custom banned password list is NOT configured."
+                    Write-Info "  Remediation: Entra ID > Security > Authentication methods > Password protection > Custom banned passwords = Enforce + add custom list"
+                    Add-Result "5.2.3.2" "Custom banned passwords" "FAIL" "Banned=$BannedEnabled, CustomList=$(if($CustomList){'set'}else{'empty'})."
+                }
+            } else {
+                Write-Info "Password Rule Settings not found. Checking via authentication methods policy..."
+                $Uri2 = "https://graph.microsoft.com/beta/policies/authenticationMethodsPolicy"
+                $MethodsPolicy = Invoke-MgGraphRequest -Method GET -Uri $Uri2 -EA Stop
+                # Fallback: check via group settings
+                $GroupSettings = Get-MgGroupSetting -EA SilentlyContinue
+                $PwdProtection = $GroupSettings | Where-Object { $_.TemplateId -eq '5cf42378-d67d-4f36-ba46-e8b86229381d' }
+                if ($PwdProtection) {
+                    $BannedEnabled = ($PwdProtection.Values | Where-Object { $_.Name -eq "EnableBannedPasswordCheck" }).Value
+                    $CustomList    = ($PwdProtection.Values | Where-Object { $_.Name -eq "BannedPasswordList" }).Value
+                    if ($BannedEnabled -eq "true" -and $CustomList) {
+                        Write-Pass "Custom banned password list is configured (via group settings)."
+                        Add-Result "5.2.3.2" "Custom banned passwords" "PASS" "Banned password check enabled."
+                    } else {
+                        Write-Fail "Custom banned password list NOT configured."
+                        Add-Result "5.2.3.2" "Custom banned passwords" "FAIL" "Banned=$BannedEnabled."
+                    }
+                } else {
+                    Write-Warn "Cannot determine banned password settings."
+                    Write-Info "  Manual check: Entra ID > Security > Authentication methods > Password protection"
+                    Add-Result "5.2.3.2" "Custom banned passwords" "WARN" "Cannot determine settings."
+                }
+            }
+        } catch {
+            Write-Warn "Error checking custom banned passwords: $($_.Exception.Message)"
+            Add-Result "5.2.3.2" "Custom banned passwords" "WARN" "Error: $($_.Exception.Message)"
         }
     }
 }
@@ -1515,6 +1952,59 @@ function Check-5_2_3_3 {
         } else {
             Write-Warn "Password protection settings not found. May not be a hybrid environment (cloud-only = N/A)."
             Add-Result "5.2.3.3" "On-prem AD password protection" "WARN" "Cloud-only or not configured."
+        }
+    }
+}
+
+function Check-5_2_3_4 {
+    Invoke-Check "5.2.3.4 (L1)" "Ensure all members have registered for MFA (Automated)" {
+        try {
+            $Uri = "https://graph.microsoft.com/beta/reports/authenticationMethods/userRegistrationDetails?\$filter=isMfaRegistered eq false and userType eq 'member'"
+            $Response = Invoke-MgGraphRequest -Method GET -Uri $Uri -EA Stop
+            $NotRegistered = @($Response.value)
+            if ($NotRegistered.Count -eq 0) {
+                Write-Pass "All members are registered for MFA."
+                Add-Result "5.2.3.4" "All members MFA capable" "PASS" "All members MFA registered."
+            } else {
+                Write-Fail "$($NotRegistered.Count) member(s) are NOT registered for MFA."
+                $NotRegistered | Select-Object -First 10 | ForEach-Object {
+                    Write-Info "  -> $($_.userPrincipalName)"
+                }
+                if ($NotRegistered.Count -gt 10) { Write-Info "  ... and $($NotRegistered.Count - 10) more" }
+                Write-Info "  Remediation: Enable MFA registration CA policy or Security Defaults."
+                Add-Result "5.2.3.4" "All members MFA capable" "FAIL" "$($NotRegistered.Count) members not MFA registered."
+            }
+        } catch {
+            Write-Warn "Error checking MFA registration: $($_.Exception.Message)"
+            Write-Info "  Requires: Reports.Read.All permission and Microsoft Entra ID P1/P2."
+            Add-Result "5.2.3.4" "All members MFA capable" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Check-5_2_3_5 {
+    Invoke-Check "5.2.3.5 (L1)" "Ensure weak authentication methods are disabled (Automated)" {
+        try {
+            $Uri = "https://graph.microsoft.com/beta/policies/authenticationMethodsPolicy"
+            $Policy = Invoke-MgGraphRequest -Method GET -Uri $Uri -EA Stop
+            $WeakMethods = @("sms", "voice")
+            $EnabledWeak = @()
+            foreach ($config in $Policy.authenticationMethodConfigurations) {
+                if ($WeakMethods -contains $config.id -and $config.state -eq "enabled") {
+                    $EnabledWeak += $config.id
+                }
+            }
+            if ($EnabledWeak.Count -eq 0) {
+                Write-Pass "Weak authentication methods (SMS, Voice) are disabled."
+                Add-Result "5.2.3.5" "Disable weak auth methods" "PASS" "SMS/Voice disabled."
+            } else {
+                Write-Fail "Weak authentication method(s) still enabled: $($EnabledWeak -join ', ')"
+                Write-Info "  Remediation: Entra ID > Security > Authentication methods > Disable SMS and Voice Call."
+                Add-Result "5.2.3.5" "Disable weak auth methods" "FAIL" "Enabled: $($EnabledWeak -join ', ')."
+            }
+        } catch {
+            Write-Warn "Error checking authentication methods policy: $($_.Exception.Message)"
+            Add-Result "5.2.3.5" "Disable weak auth methods" "WARN" "Error: $($_.Exception.Message)"
         }
     }
 }
@@ -1607,6 +2097,33 @@ function Check-5_3_1 {
     }
 }
 
+function Check-5_3_2 {
+    Invoke-Check "5.3.2 (L1)" "Ensure access reviews for external users are configured (Automated)" {
+        try {
+            $Uri      = "https://graph.microsoft.com/beta/identityGovernance/accessReviews/definitions"
+            $Response = Invoke-MgGraphRequest -Method GET -Uri $Uri -EA Stop
+            $GuestReviews = @($Response.value | Where-Object {
+                $_.scope.query -match "userType eq 'Guest'" -or
+                $_.scope.'@odata.type' -match 'accessReviewQueryScope' -and
+                ($_.scope.query -match 'guest' -or $_.scope.queryRoot -match 'guest')
+            })
+            if ($GuestReviews.Count -gt 0) {
+                Write-Pass "$($GuestReviews.Count) access review(s) configured for external/guest users."
+                $GuestReviews | ForEach-Object { Write-Info "  -> $($_.displayName) (Status: $($_.status))" }
+                Add-Result "5.3.2" "Guest access reviews" "PASS" "$($GuestReviews.Count) guest review(s) found."
+            } else {
+                Write-Fail "No access reviews configured specifically for guest/external users."
+                Write-Info "  Remediation: Entra ID > Identity Governance > Access Reviews > New review for guest users."
+                Add-Result "5.3.2" "Guest access reviews" "FAIL" "No guest access reviews."
+            }
+        } catch {
+            Write-Warn "Error checking guest access reviews: $($_.Exception.Message)"
+            Write-Info "  Requires: AccessReview.Read.All and Entra ID P2."
+            Add-Result "5.3.2" "Guest access reviews" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
 function Check-5_3_3 {
     Invoke-Check "5.3.3 (L1)" "Ensure access reviews for privileged roles are configured (Automated)" {
         try {
@@ -1655,6 +2172,51 @@ function Check-5_3_5 {
 # ===============================================================================
 #  SECTION 6 - Exchange Online
 # ===============================================================================
+
+function Check-6_1_1 {
+    Invoke-Check "6.1.1 (L1)" "Ensure Microsoft 365 audit log search is enabled (Automated)" {
+        if (-not (Assert-Exo)) { return }
+        $OrgConfig = Get-OrganizationConfig -EA Stop
+        $AuditDisabled = $OrgConfig.AuditDisabled
+        Write-Info "AuditDisabled: $AuditDisabled"
+        if ($AuditDisabled -eq $false) {
+            Write-Pass "Unified audit log search is enabled (AuditDisabled = False)."
+            Add-Result "6.1.1" "Audit log search enabled" "PASS" "AuditDisabled=$AuditDisabled."
+        } else {
+            Write-Fail "Unified audit log search is NOT enabled."
+            Write-Info "  Remediation: Set-OrganizationConfig -AuditDisabled `$false"
+            Add-Result "6.1.1" "Audit log search enabled" "FAIL" "AuditDisabled=$AuditDisabled."
+        }
+    }
+}
+
+function Check-6_1_2 {
+    Invoke-Check "6.1.2 (L1)" "Ensure mailbox auditing for E5 users is enabled (Automated)" {
+        if (-not (Assert-Exo)) { return }
+        $OrgConfig = Get-OrganizationConfig -EA Stop
+        $AuditDisabled = $OrgConfig.AuditDisabled
+        Write-Info "Organization AuditDisabled: $AuditDisabled"
+        if ($AuditDisabled -eq $false) {
+            # Check if mailbox auditing is on by default for the org
+            Write-Info "Mailbox auditing is enabled at the organization level."
+            # Sample check on mailboxes for E5 (those with advanced audit)
+            $Mailboxes = @(Get-EXOMailbox -ResultSize 25 -PropertySets Audit -EA SilentlyContinue)
+            $DisabledAudit = @($Mailboxes | Where-Object { $_.AuditEnabled -eq $false })
+            if ($DisabledAudit.Count -eq 0) {
+                Write-Pass "All sampled mailboxes ($($Mailboxes.Count)) have auditing enabled."
+                Add-Result "6.1.2" "Mailbox auditing E5" "PASS" "All sampled mailboxes audit-enabled."
+            } else {
+                Write-Warn "$($DisabledAudit.Count)/$($Mailboxes.Count) sampled mailboxes have auditing disabled."
+                $DisabledAudit | Select-Object -First 5 | ForEach-Object { Write-Info "  -> $($_.UserPrincipalName)" }
+                Add-Result "6.1.2" "Mailbox auditing E5" "WARN" "$($DisabledAudit.Count) mailboxes audit-disabled."
+            }
+        } else {
+            Write-Fail "Organization-level auditing is disabled."
+            Write-Info "  Remediation: Set-OrganizationConfig -AuditDisabled `$false"
+            Add-Result "6.1.2" "Mailbox auditing E5" "FAIL" "Org auditing disabled."
+        }
+    }
+}
 
 function Check-6_1_3 {
     Invoke-Check "6.1.3 (L1)" "Ensure 'AuditBypassEnabled' is not enabled on mailboxes (Automated)" {
@@ -1709,6 +2271,68 @@ function Check-6_2_2 {
             Write-Fail "$($Bad.Count) transport rule(s) bypass spam filtering:"
             $Bad | ForEach-Object { Write-Info "  -> $($_.Name): $($_.SenderDomainIs -join ', ')" }
             Add-Result "6.2.2" "No domain bypass rules" "FAIL" "Domain bypass rules found."
+        }
+    }
+}
+
+function Check-6_2_3 {
+    Invoke-Check "6.2.3 (L1)" "Ensure external sender tagging is enabled (Automated)" {
+        if (-not (Assert-Exo)) { return }
+        $MaxRetries = 3
+        $LastError = $null
+        for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+            try {
+                $ExternalConfig = Get-ExternalInOutlook -EA Stop
+                Write-Info "External sender tagging Enabled: $($ExternalConfig.Enabled)"
+                if ($ExternalConfig.Enabled -eq $true) {
+                    Write-Pass "External sender tagging is enabled."
+                    Add-Result "6.2.3" "External sender tagging" "PASS" "Enabled."
+                } else {
+                    Write-Fail "External sender tagging is NOT enabled."
+                    Write-Info "  Remediation: Set-ExternalInOutlook -Enabled `$true"
+                    Add-Result "6.2.3" "External sender tagging" "FAIL" "Not enabled."
+                }
+                return
+            } catch {
+                $LastError = $_.Exception.Message
+                if ($attempt -lt $MaxRetries) {
+                    Write-Info "  Server error on attempt $attempt/$MaxRetries - retrying in 5s..."
+                    Start-Sleep -Seconds 5
+                }
+            }
+        }
+        Write-Warn "Error checking external sender tagging after $MaxRetries attempts: $LastError"
+        Write-Info "  Note: Get-ExternalInOutlook requires Exchange Online Management v3.0+"
+        Add-Result "6.2.3" "External sender tagging" "WARN" "Error after $MaxRetries retries: $LastError"
+    }
+}
+
+function Check-6_3_1 {
+    Invoke-Check "6.3.1 (L2)" "Ensure users installing Outlook add-ins is not allowed (Automated)" {
+        if (-not (Assert-Exo)) { return }
+        try {
+            $RoleAssignPolicies = @(Get-RoleAssignmentPolicy -EA Stop)
+            $DefaultPolicy = $RoleAssignPolicies | Where-Object { $_.IsDefault -eq $true }
+            if ($DefaultPolicy) {
+                $AssignedRoles = $DefaultPolicy.AssignedRoles
+                Write-Info "Default role assignment policy: $($DefaultPolicy.Name)"
+                Write-Info "Assigned roles: $($AssignedRoles -join ', ')"
+                $AddinRoles = @($AssignedRoles | Where-Object { $_ -match 'App' -and $_ -match 'Install|Marketplace' })
+                if ($AddinRoles.Count -eq 0) {
+                    Write-Pass "No add-in install roles assigned to users in default policy."
+                    Add-Result "6.3.1" "Restrict Outlook add-ins" "PASS" "No addin install roles."
+                } else {
+                    Write-Fail "Add-in installation roles found: $($AddinRoles -join ', ')"
+                    Write-Info "  Remediation: Remove My Custom Apps, My Marketplace Apps, My ReadWriteMailbox Apps from default role assignment policy."
+                    Add-Result "6.3.1" "Restrict Outlook add-ins" "FAIL" "Roles: $($AddinRoles -join ', ')."
+                }
+            } else {
+                Write-Warn "No default role assignment policy found."
+                Add-Result "6.3.1" "Restrict Outlook add-ins" "WARN" "No default policy."
+            }
+        } catch {
+            Write-Warn "Error checking role assignment policy: $($_.Exception.Message)"
+            Add-Result "6.3.1" "Restrict Outlook add-ins" "WARN" "Error: $($_.Exception.Message)"
         }
     }
 }
@@ -1782,6 +2406,39 @@ function Check-6_5_4 {
 #  SECTION 7 - SharePoint Online & OneDrive
 # ===============================================================================
 
+function Check-6_5_5 {
+    Invoke-Check "6.5.5 (L1)" "Ensure unauthenticated direct send email is restricted (Automated)" {
+        if (-not (Assert-Exo)) { return }
+        try {
+            $InboundConnectors = @(Get-InboundConnector -EA SilentlyContinue)
+            $TransportRules    = @(Get-TransportRule -EA SilentlyContinue | Where-Object { $_.State -eq "Enabled" })
+            # Check for connectors allowing unauthenticated relay
+            $OpenConnectors = @($InboundConnectors | Where-Object {
+                $_.Enabled -eq $true -and
+                $_.SenderIPAddresses.Count -eq 0 -and
+                $_.RequireTls -eq $false
+            })
+            # Check for transport rules restricting direct send
+            $DirectSendRules = @($TransportRules | Where-Object {
+                $_.Name -match 'direct.?send|unauthenticated' -or
+                ($_.FromAddressContainsWords -and $_.RejectMessageReasonText)
+            })
+            if ($OpenConnectors.Count -eq 0) {
+                Write-Pass "No open inbound connectors allowing unauthenticated relay found."
+                Add-Result "6.5.5" "Restrict direct send" "PASS" "No open connectors."
+            } else {
+                Write-Fail "$($OpenConnectors.Count) inbound connector(s) may allow unauthenticated direct send."
+                $OpenConnectors | ForEach-Object { Write-Info "  -> $($_.Name) (RequireTLS=$($_.RequireTls), SenderIPs=$($_.SenderIPAddresses.Count))" }
+                Write-Info "  Remediation: Review inbound connectors and restrict to known sender IPs with TLS required."
+                Add-Result "6.5.5" "Restrict direct send" "FAIL" "$($OpenConnectors.Count) open connector(s)."
+            }
+        } catch {
+            Write-Warn "Error checking inbound connectors: $($_.Exception.Message)"
+            Add-Result "6.5.5" "Restrict direct send" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
 function Check-7_2_1 {
     Invoke-Check "7.2.1 (L1)" "Ensure modern authentication for SharePoint is required (Automated)" {
         if (-not (Assert-Spo)) { Add-Result "7.2.1" "SPO modern auth required" "WARN" "SPO not connected."; return }
@@ -1813,6 +2470,41 @@ function Check-7_2_2 {
     }
 }
 
+function Check-7_2_3 {
+    Invoke-Check "7.2.3 (L1)" "Ensure external content sharing is restricted (Automated)" {
+        if (-not (Assert-Spo)) { return }
+        $Tenant = Get-SPOTenant -EA Stop
+        $Sharing = $Tenant.SharingCapability
+        Write-Info "SPO SharingCapability: $Sharing"
+        # ExistingExternalUserSharingOnly or Disabled are most restrictive
+        if ($Sharing -eq "ExternalUserSharingOnly" -or $Sharing -eq "ExistingExternalUserSharingOnly" -or $Sharing -eq "Disabled") {
+            Write-Pass "External content sharing is restricted (SharingCapability=$Sharing)."
+            Add-Result "7.2.3" "External content sharing" "PASS" "SharingCapability=$Sharing."
+        } else {
+            Write-Fail "External content sharing is too permissive: $Sharing"
+            Write-Info "  Remediation: SharePoint admin center > Policies > Sharing > Set to 'Existing guests' or more restrictive."
+            Add-Result "7.2.3" "External content sharing" "FAIL" "SharingCapability=$Sharing."
+        }
+    }
+}
+
+function Check-7_2_4 {
+    Invoke-Check "7.2.4 (L1)" "Ensure OneDrive content sharing is restricted (Automated)" {
+        if (-not (Assert-Spo)) { return }
+        $Tenant = Get-SPOTenant -EA Stop
+        $OneDriveSharing = $Tenant.OneDriveSharingCapability
+        Write-Info "OneDrive SharingCapability: $OneDriveSharing"
+        if ($OneDriveSharing -eq "ExternalUserSharingOnly" -or $OneDriveSharing -eq "ExistingExternalUserSharingOnly" -or $OneDriveSharing -eq "Disabled") {
+            Write-Pass "OneDrive content sharing is restricted ($OneDriveSharing)."
+            Add-Result "7.2.4" "OneDrive sharing restricted" "PASS" "OneDriveSharingCapability=$OneDriveSharing."
+        } else {
+            Write-Fail "OneDrive sharing is too permissive: $OneDriveSharing"
+            Write-Info "  Remediation: SharePoint admin center > Policies > Sharing > OneDrive > Set to 'Existing guests' or more restrictive."
+            Add-Result "7.2.4" "OneDrive sharing restricted" "FAIL" "OneDriveSharingCapability=$OneDriveSharing."
+        }
+    }
+}
+
 function Check-7_2_5 {
     Invoke-Check "7.2.5 (L2)" "Ensure SharePoint guest users cannot share items they don't own (Automated)" {
         if (-not (Assert-Spo)) { Add-Result "7.2.5" "SPO guest resharing blocked" "WARN" "SPO not connected."; return }
@@ -1825,6 +2517,28 @@ function Check-7_2_5 {
             Write-Fail "External users CAN reshare items they don't own."
             Write-Info "  Remediation: SPO Admin > Policies > Sharing > More external sharing settings > Uncheck 'Allow guests to share'"
             Add-Result "7.2.5" "SPO guest resharing blocked" "FAIL" "PreventResharing = False."
+        }
+    }
+}
+
+function Check-7_2_6 {
+    Invoke-Check "7.2.6 (L2)" "Ensure guest access to a site or OneDrive will expire automatically (Automated)" {
+        if (-not (Assert-Spo)) { return }
+        $Tenant = Get-SPOTenant -EA Stop
+        $GuestExpDays = $Tenant.ExternalUserExpirationRequired
+        $GuestExpValue = $Tenant.ExternalUserExpireInDays
+        Write-Info "ExternalUserExpirationRequired: $GuestExpDays"
+        Write-Info "ExternalUserExpireInDays: $GuestExpValue"
+        if ($GuestExpDays -eq $true -and $GuestExpValue -le 30) {
+            Write-Pass "Guest access expires automatically in $GuestExpValue days."
+            Add-Result "7.2.6" "Guest access auto-expire" "PASS" "Expires in $GuestExpValue days."
+        } elseif ($GuestExpDays -eq $true) {
+            Write-Warn "Guest access expires in $GuestExpValue days (recommended: 30 or less)."
+            Add-Result "7.2.6" "Guest access auto-expire" "WARN" "Expires in $GuestExpValue days."
+        } else {
+            Write-Fail "Guest access does NOT expire automatically."
+            Write-Info "  Remediation: SharePoint admin center > Policies > Sharing > Guest access expires after X days."
+            Add-Result "7.2.6" "Guest access auto-expire" "FAIL" "No auto-expiry."
         }
     }
 }
@@ -2036,6 +2750,23 @@ function Check-8_2_4 {
     }
 }
 
+function Check-8_5_1 {
+    Invoke-Check "8.5.1 (L2)" "Ensure anonymous users can't join a meeting (Automated)" {
+        if (-not (Assert-Teams)) { return }
+        $Policy = Get-CsTeamsMeetingPolicy -Identity Global -EA Stop
+        $AnonJoin = $Policy.AllowAnonymousUsersToJoinMeeting
+        Write-Info "AllowAnonymousUsersToJoinMeeting: $AnonJoin"
+        if ($AnonJoin -eq $false) {
+            Write-Pass "Anonymous users cannot join meetings."
+            Add-Result "8.5.1" "Anon join meetings" "PASS" "AllowAnonymousUsersToJoinMeeting=$AnonJoin."
+        } else {
+            Write-Fail "Anonymous users CAN join meetings."
+            Write-Info "  Remediation: Teams admin center > Meetings > Meeting policies > Global > Anonymous users can join = Off"
+            Add-Result "8.5.1" "Anon join meetings" "FAIL" "AllowAnonymousUsersToJoinMeeting=$AnonJoin."
+        }
+    }
+}
+
 function Check-8_5_2 {
     Invoke-Check "8.5.2 (L1)" "Ensure anonymous users and dial-in callers can't start a meeting (Automated)" {
         if (-not (Assert-Teams)) { Add-Result "8.5.2" "Block anon start meeting" "WARN" "Teams not connected."; return }
@@ -2047,6 +2778,75 @@ function Check-8_5_2 {
         } else {
             Write-Fail "Anonymous users CAN start meetings."
             Add-Result "8.5.2" "Block anon start meeting" "FAIL" "AnonStart = True."
+        }
+    }
+}
+
+function Check-8_5_3 {
+    Invoke-Check "8.5.3 (L1)" "Ensure anonymous users and dial-in callers can't start a meeting (Automated)" {
+        if (-not (Assert-Teams)) { return }
+        $Policy = Get-CsTeamsMeetingPolicy -Identity Global -EA Stop
+        $AnonStart = $Policy.AllowAnonymousUsersToStartMeeting
+        Write-Info "AllowAnonymousUsersToStartMeeting: $AnonStart"
+        if ($AnonStart -eq $false) {
+            Write-Pass "Anonymous users and dial-in callers cannot start meetings."
+            Add-Result "8.5.3" "Anon start meetings" "PASS" "AllowAnonymousUsersToStartMeeting=$AnonStart."
+        } else {
+            Write-Fail "Anonymous users CAN start meetings."
+            Write-Info "  Remediation: Teams admin center > Meetings > Meeting policies > Anonymous can start = Off"
+            Add-Result "8.5.3" "Anon start meetings" "FAIL" "AllowAnonymousUsersToStartMeeting=$AnonStart."
+        }
+    }
+}
+
+function Check-8_5_4 {
+    Invoke-Check "8.5.4 (L2)" "Ensure users dialing in can't bypass the lobby (Automated)" {
+        if (-not (Assert-Teams)) { return }
+        $Policy = Get-CsTeamsMeetingPolicy -Identity Global -EA Stop
+        $PSTNBypass = $Policy.AllowPSTNUsersToBypassLobby
+        Write-Info "AllowPSTNUsersToBypassLobby: $PSTNBypass"
+        if ($PSTNBypass -eq $false) {
+            Write-Pass "PSTN dial-in users cannot bypass the lobby."
+            Add-Result "8.5.4" "PSTN bypass lobby" "PASS" "AllowPSTNUsersToBypassLobby=$PSTNBypass."
+        } else {
+            Write-Fail "PSTN dial-in users CAN bypass the lobby."
+            Write-Info "  Remediation: Teams admin center > Meetings > Meeting policies > PSTN callers can bypass the lobby = Off"
+            Add-Result "8.5.4" "PSTN bypass lobby" "FAIL" "AllowPSTNUsersToBypassLobby=$PSTNBypass."
+        }
+    }
+}
+
+function Check-8_5_5 {
+    Invoke-Check "8.5.5 (L1)" "Ensure meeting chat does not allow anonymous users (Automated)" {
+        if (-not (Assert-Teams)) { return }
+        $Policy = Get-CsTeamsMeetingPolicy -Identity Global -EA Stop
+        $MeetingChat = $Policy.MeetingChatEnabledType
+        Write-Info "MeetingChatEnabledType: $MeetingChat"
+        # Acceptable: EnabledExceptAnonymous or Disabled
+        if ($MeetingChat -eq "EnabledExceptAnonymous" -or $MeetingChat -eq "Disabled") {
+            Write-Pass "Meeting chat does not allow anonymous users ($MeetingChat)."
+            Add-Result "8.5.5" "Meeting chat anon" "PASS" "MeetingChatEnabledType=$MeetingChat."
+        } else {
+            Write-Fail "Meeting chat allows anonymous users: $MeetingChat"
+            Write-Info "  Remediation: Teams admin center > Meetings > Meeting policies > Meeting chat = On for everyone except anonymous users"
+            Add-Result "8.5.5" "Meeting chat anon" "FAIL" "MeetingChatEnabledType=$MeetingChat."
+        }
+    }
+}
+
+function Check-8_5_6 {
+    Invoke-Check "8.5.6 (L2)" "Ensure only organizers and co-organizers can present (Automated)" {
+        if (-not (Assert-Teams)) { return }
+        $Policy = Get-CsTeamsMeetingPolicy -Identity Global -EA Stop
+        $DesignatedPresenter = $Policy.DesignatedPresenterRoleMode
+        Write-Info "DesignatedPresenterRoleMode: $DesignatedPresenter"
+        if ($DesignatedPresenter -eq "OrganizerOnlyUserOverride") {
+            Write-Pass "Only organizers and co-organizers can present by default."
+            Add-Result "8.5.6" "Presenter restrictions" "PASS" "DesignatedPresenterRoleMode=$DesignatedPresenter."
+        } else {
+            Write-Fail "Presenter role is not restricted to organizers: $DesignatedPresenter"
+            Write-Info "  Remediation: Teams admin center > Meetings > Meeting policies > Who can present = Only organizers and co-organizers"
+            Add-Result "8.5.6" "Presenter restrictions" "FAIL" "DesignatedPresenterRoleMode=$DesignatedPresenter."
         }
     }
 }
@@ -2098,8 +2898,29 @@ function Check-8_5_9 {
     }
 }
 
+function Check-8_6_1 {
+    Invoke-Check "8.6.1 (L1)" "Ensure users can report security concerns in Teams (Automated)" {
+        if (-not (Assert-Teams)) { return }
+        try {
+            $MsgPolicy = Get-CsTeamsMessagingPolicy -Identity Global -EA Stop
+            $SecurityReport = $MsgPolicy.AllowSecurityEndUserReporting
+            Write-Info "AllowSecurityEndUserReporting: $SecurityReport"
+            if ($SecurityReport -eq $true) {
+                Write-Pass "Users can report security concerns in Teams."
+                Add-Result "8.6.1" "Security reporting in Teams" "PASS" "AllowSecurityEndUserReporting=$SecurityReport."
+            } else {
+                Write-Fail "Users CANNOT report security concerns in Teams."
+                Write-Info "  Remediation: Teams admin center > Messaging policies > Global > Report a security concern = On"
+                Add-Result "8.6.1" "Security reporting in Teams" "FAIL" "AllowSecurityEndUserReporting=$SecurityReport."
+            }
+        } catch {
+            Write-Warn "Error checking Teams messaging policy: $($_.Exception.Message)"
+            Add-Result "8.6.1" "Security reporting in Teams" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
 # ===============================================================================
-#  SECTION 9 - Power BI / Fabric
 #  Uses the Fabric Admin API for tenant settings.
 #    - Requires 'Tenant.Read.All' on Power BI Service.
 #    - Requires a Fabric Administrator / Power BI Administrator directory role.
@@ -2217,6 +3038,9 @@ function Get-PBISettingCandidates {
         "ServicePrincipalCanManageWorkspaces" {
             return @("ServicePrincipalCanManageWorkspaces", "ServicePrincipalAccessGlobalAPIs")
         }
+        "ExternalDatasetSharingTenant" {
+            return @("ExternalDatasetSharingTenant", "ExternalSharingV2", "AllowExternalDataSharingReceiverSwitch", "AllowExternalDataSharingSwitch")
+        }
         default {
             return @($SettingName)
         }
@@ -2286,10 +3110,39 @@ function Check-9_PBI {
 }
 
 function Check-9_1_1  { Check-9_PBI "9.1.1 (L1)"  "Ensure guest user access is restricted in Power BI"                                       "AllowGuestAccess"                     $false }
+function Check-9_1_2  { Check-9_PBI "9.1.2 (L1)"  "Ensure external user invitations are restricted in Power BI"                                  "AllowGuestLookup"                     $false }
+function Check-9_1_3 {
+    Invoke-Check "9.1.3 (L1)" "Ensure Azure AD Conditional Access is used for Power BI (Automated)" {
+        try {
+            $CAPolicies = @(Get-MgIdentityConditionalAccessPolicy -All -EA Stop)
+            # Power BI Service app ID
+            $PBIAppId = "00000009-0000-0000-c000-000000000000"
+            $PBIPolicies = @($CAPolicies | Where-Object {
+                $_.State -eq "enabled" -and
+                ($_.Conditions.Applications.IncludeApplications -contains $PBIAppId -or
+                 $_.Conditions.Applications.IncludeApplications -contains "All")
+            })
+            if ($PBIPolicies.Count -gt 0) {
+                Write-Pass "$($PBIPolicies.Count) CA policy/policies apply to Power BI."
+                $PBIPolicies | ForEach-Object { Write-Info "  -> $($_.DisplayName)" }
+                Add-Result "9.1.3" "CA for Power BI" "PASS" "$($PBIPolicies.Count) CA policy targets PBI."
+            } else {
+                Write-Fail "No Conditional Access policy targets the Power BI service."
+                Write-Info "  Remediation: Entra ID > Security > Conditional Access > New policy > Cloud apps > Select 'Microsoft Power BI'"
+                Add-Result "9.1.3" "CA for Power BI" "FAIL" "No CA policy targets Power BI."
+            }
+        } catch {
+            Write-Warn "Error checking CA policies for Power BI: $($_.Exception.Message)"
+            Add-Result "9.1.3" "CA for Power BI" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
 function Check-9_1_4  { Check-9_PBI "9.1.4 (L1)"  "Ensure 'Publish to web' is restricted in Power BI"                                        "PublishToWeb"                         $false }
 function Check-9_1_5  { Check-9_PBI "9.1.5 (L2)"  "Ensure R and Python visuals are Disabled in Power BI"                                     "AllowRVisuals"                        $false }
 function Check-9_1_6  { Check-9_PBI "9.1.6 (L1)"  "Ensure 'Allow users to apply sensitivity labels' is Enabled in Power BI"                  "SensitivityLabelsEnabled"             $true  }
 function Check-9_1_7  { Check-9_PBI "9.1.7 (L1)"  "Ensure shareable links are restricted in Power BI"                                        "ShareLinkToEntireOrg"                 $false }
+function Check-9_1_8  { Check-9_PBI "9.1.8 (L1)"  "Ensure block ResourceKey authentication is enabled in Power BI"                               "BlockResourceKeyAuthentication"       $true  }
+function Check-9_1_9  { Check-9_PBI "9.1.9 (L1)"  "Ensure external data sharing is restricted in Power BI"                                       "ExternalDatasetSharingTenant"         $false }
 function Check-9_1_10 { Check-9_PBI "9.1.10 (L1)" "Ensure access to APIs by service principals is restricted in Power BI"                    "ServicePrincipalAccess"               $false }
 function Check-9_1_11 { Check-9_PBI "9.1.11 (L1)" "Ensure service principals cannot create and use profiles in Power BI"                     "ServicePrincipalProfiles"             $false }
 function Check-9_1_12 { Check-9_PBI "9.1.12 (L1)" "Ensure service principals cannot manage workspaces in Power BI"                           "ServicePrincipalCanManageWorkspaces"  $false }
@@ -2391,7 +3244,7 @@ Clear-Host
 
 Write-Host ""
 Write-Host "+==================================================================================+" -ForegroundColor Cyan
-Write-Host "|   CIS Microsoft 365 Foundations Benchmark v6.0.1 - 88 Automated Checks           |" -ForegroundColor Cyan
+Write-Host "|   CIS Microsoft 365 Foundations Benchmark v6.0.1 - 129 Automated Checks          |" -ForegroundColor Cyan
 Write-Host "|   Tenant : $TenantId                          |" -ForegroundColor Cyan
 Write-Host "+==================================================================================+" -ForegroundColor Cyan
 
@@ -2404,44 +3257,52 @@ Check-1_3_1;  Check-1_3_2;  Check-1_3_3;  Check-1_3_4
 Check-1_3_5;  Check-1_3_6;  Check-1_3_7;  Check-1_3_9
 
 Write-Banner "SECTION 2 - Microsoft 365 Defender (Email & Collaboration)"
-Check-2_1_2;  Check-2_1_3;  Check-2_1_5;  Check-2_1_6
+Check-2_1_1;  Check-2_1_2;  Check-2_1_3;  Check-2_1_4
+Check-2_1_5;  Check-2_1_6;  Check-2_1_7
 Check-2_1_8;  Check-2_1_9;  Check-2_1_10
-Check-2_1_13; Check-2_1_14; Check-2_1_15
+Check-2_1_11; Check-2_1_12; Check-2_1_13; Check-2_1_14; Check-2_1_15
+Check-2_4_1;  Check-2_4_2;  Check-2_4_4
 
 Write-Banner "SECTION 3 - Compliance (DLP, Information Protection)"
-Check-3_2_1;  Check-3_3_1
+Check-3_1_1;  Check-3_2_1;  Check-3_2_2;  Check-3_3_1
 
 Write-Banner "SECTION 4 - Intune / Device Management"
 Check-4_1;    Check-4_2
 
 Write-Banner "SECTION 5 - Microsoft Entra ID (Identity, MFA, Conditional Access, PIM)"
 Check-5_1_2_1;  Check-5_1_2_2;  Check-5_1_2_3
-Check-5_1_4_2;  Check-5_1_4_3;  Check-5_1_4_4;  Check-5_1_4_5;  Check-5_1_4_6
-Check-5_1_5_1
-Check-5_1_6_1;  Check-5_1_6_3
-Check-5_2_2_1;  Check-5_2_2_2;  Check-5_2_2_4;  Check-5_2_2_5
-Check-5_2_2_8;  Check-5_2_2_9;  Check-5_2_2_10; Check-5_2_2_11
-Check-5_2_3_1;  Check-5_2_3_3;  Check-5_2_3_6;  Check-5_2_3_7
-Check-5_3_1;    Check-5_3_3;    Check-5_3_4;    Check-5_3_5
+Check-5_1_3_1;  Check-5_1_3_2
+Check-5_1_4_1;  Check-5_1_4_2;  Check-5_1_4_3;  Check-5_1_4_4;  Check-5_1_4_5;  Check-5_1_4_6
+Check-5_1_5_1;  Check-5_1_5_2
+Check-5_1_6_1;  Check-5_1_6_2;  Check-5_1_6_3
+Check-5_2_2_1;  Check-5_2_2_2;  Check-5_2_2_3;  Check-5_2_2_4;  Check-5_2_2_5
+Check-5_2_2_6;  Check-5_2_2_7;  Check-5_2_2_8;  Check-5_2_2_9;  Check-5_2_2_10; Check-5_2_2_11; Check-5_2_2_12
+Check-5_2_3_1;  Check-5_2_3_2;  Check-5_2_3_3;  Check-5_2_3_4;  Check-5_2_3_5;  Check-5_2_3_6;  Check-5_2_3_7
+Check-5_3_1;    Check-5_3_2;    Check-5_3_3;    Check-5_3_4;    Check-5_3_5
 
 Write-Banner "SECTION 6 - Exchange Online"
-Check-6_1_3
-Check-6_2_1;  Check-6_2_2
-Check-6_5_1;  Check-6_5_2;  Check-6_5_3;  Check-6_5_4
+Check-6_1_1;  Check-6_1_2;  Check-6_1_3
+Check-6_2_1;  Check-6_2_2;  Check-6_2_3
+Check-6_3_1
+Check-6_5_1;  Check-6_5_2;  Check-6_5_3;  Check-6_5_4;  Check-6_5_5
 
 Write-Banner "SECTION 7 - SharePoint Online & OneDrive"
-Check-7_2_1;  Check-7_2_2;  Check-7_2_5;  Check-7_2_7
+Check-7_2_1;  Check-7_2_2;  Check-7_2_3;  Check-7_2_4;  Check-7_2_5
+Check-7_2_6;  Check-7_2_7
 Check-7_2_9;  Check-7_2_10; Check-7_2_11
 Check-7_3_1;  Check-7_3_2
 
 Write-Banner "SECTION 8 - Microsoft Teams"
 Check-8_1_1;  Check-8_1_2
 Check-8_2_1;  Check-8_2_2;  Check-8_2_3;  Check-8_2_4
-Check-8_5_2;  Check-8_5_7;  Check-8_5_8;  Check-8_5_9
+Check-8_5_1;  Check-8_5_2;  Check-8_5_3;  Check-8_5_4;  Check-8_5_5;  Check-8_5_6
+Check-8_5_7;  Check-8_5_8;  Check-8_5_9
+Check-8_6_1
 
 Write-Banner "SECTION 9 - Power BI / Fabric"
-Check-9_1_1;  Check-9_1_4;  Check-9_1_5;  Check-9_1_6
-Check-9_1_7;  Check-9_1_10; Check-9_1_11; Check-9_1_12
+Check-9_1_1;  Check-9_1_2;  Check-9_1_3;  Check-9_1_4;  Check-9_1_5;  Check-9_1_6
+Check-9_1_7;  Check-9_1_8;  Check-9_1_9
+Check-9_1_10; Check-9_1_11; Check-9_1_12
 
 Write-Banner "RESULTS SUMMARY"
 Show-Summary

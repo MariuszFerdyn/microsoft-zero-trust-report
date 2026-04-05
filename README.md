@@ -1,7 +1,7 @@
 # CIS Microsoft 365 Foundations Benchmark v6.0.1 — Audit Script
 
 Automated PowerShell checks for the **CIS Microsoft 365 Foundations Benchmark v6.0.1**.  
-Runs **88 automated checks** across 9 sections: Admin Center, Defender, Purview, Intune, Entra ID, Exchange Online, SharePoint/OneDrive, Teams, and Power BI.
+Runs **129 automated checks** across 9 sections: Admin Center, Defender, Purview, Intune, Entra ID, Exchange Online, SharePoint/OneDrive, Teams, and Power BI.
 
 ## ⚡ Getting Started — Guided Setup
 
@@ -96,6 +96,7 @@ The benchmark uses **app-only authentication** for most Microsoft 365 services a
 - `RoleManagement.Read.Directory`
 - `SecurityEvents.Read.All`
 - `User.Read.All`
+- `UserAuthenticationMethod.Read.All`
 
 #### Power BI Service application permission
 
@@ -363,10 +364,10 @@ On GitHub, Markdown preserves the spacing and formatting, but it does **not** re
                              ServicePrincipalCanManageWorkspaces = True (expected False).
 
 ==================================================================================
-    Checks run :   88
-    PASS       :   28  (32%)
-    FAIL       :   51  (58%)
-    WARN       :    9  (10%)
+    Checks run :  129
+    PASS       :   40  (31%)
+    FAIL       :   75  (58%)
+    WARN       :   14  (11%)
 ==================================================================================
 
     Connection status:
@@ -494,12 +495,12 @@ On GitHub, Markdown preserves the spacing and formatting, but it does **not** re
 | Section | Area                              | Checks |
 |---------|-----------------------------------|--------|
 | 1       | Microsoft 365 Admin Center        | 13     |
-| 2       | Microsoft 365 Defender            | 10     |
-| 3       | Microsoft Purview / Compliance    | 2      |
+| 2       | Microsoft 365 Defender            | 18     |
+| 3       | Microsoft Purview / Compliance    | 4      |
 | 4       | Intune / Device Management        | 2      |
-| 5       | Microsoft Entra ID + CA + PIM     | 27     |
-| 6       | Exchange Online                   | 7      |
-| 7       | SharePoint Online & OneDrive      | 9      |
-| 8       | Microsoft Teams                   | 10     |
-| 9       | Power BI                          | 8      |
-| **Total** |                                 | **88** |
+| 5       | Microsoft Entra ID + CA + PIM     | 40     |
+| 6       | Exchange Online                   | 12     |
+| 7       | SharePoint Online & OneDrive      | 12     |
+| 8       | Microsoft Teams                   | 16     |
+| 9       | Power BI                          | 12     |
+| **Total** |                                 | **129** |

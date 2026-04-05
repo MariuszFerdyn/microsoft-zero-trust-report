@@ -478,7 +478,8 @@ $graphPerms = @(
   "SecurityEvents.Read.All",
   "IdentityRiskyUser.Read.All",
   "AccessReview.Read.All",
-  "OrgSettings-Forms.ReadWrite.All"
+  "OrgSettings-Forms.ReadWrite.All",
+  "UserAuthenticationMethod.Read.All"
 ) | Sort-Object -Unique
 
 Write-Info "Adding Microsoft Graph app roles..."
@@ -954,6 +955,7 @@ if ($grantedRoles.Count -gt 0) {
     @{ Scope = "IdentityRiskyUser.Read.All";               Api = "Graph" },
     @{ Scope = "AccessReview.Read.All";                    Api = "Graph" },
     @{ Scope = "OrgSettings-Forms.ReadWrite.All";          Api = "Graph" },
+    @{ Scope = "UserAuthenticationMethod.Read.All";        Api = "Graph" },
     @{ Scope = "Tenant.Read.All";                          Api = "Power BI" }
   )
   if ($IncludeExchange) {
