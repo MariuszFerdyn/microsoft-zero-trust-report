@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    CIS Microsoft Azure Foundations Benchmark v5.0.0 - All 93 Automated Checks
+    CIS Microsoft Azure Foundations Benchmark v5.0.0 - 103 Checks (Automated + Manual)
 
 .DESCRIPTION
     Implements all 93 automated checks from the CIS Microsoft Azure Foundations
@@ -488,6 +488,42 @@ function Check-2_1_11 {
         }
     }
 }
+
+function Check-2_1_8 {
+    Invoke-Check "2.1.8" "Ensure critical data in Databricks is encrypted with customer-managed keys (all workspaces)" {
+        try {
+            $workspaces = @(Get-AzResource -ResourceType "Microsoft.Databricks/workspaces" -ErrorAction SilentlyContinue)
+            if ($workspaces.Count -eq 0) {
+                Write-Info "No Databricks workspaces found - check not applicable"
+                Add-Result "2.1.8" "Databricks CMK encryption" "INFO" "No Databricks workspaces found"
+                return
+            }
+            $allGood = $true
+            foreach ($ws in $workspaces) {
+                $detail = Get-AzResource -ResourceId $ws.ResourceId -ExpandProperties -ErrorAction SilentlyContinue
+                $encryption = $detail.Properties.encryption
+                $parameters = $detail.Properties.parameters
+                $cmkManaged = ($parameters.encryption.value.keySource -eq "Microsoft.Keyvault") -or `
+                              ($encryption.entities.managedDisk.keySource -eq "Microsoft.Keyvault") -or `
+                              ($encryption.entities.managedServices.keySource -eq "Microsoft.Keyvault")
+                if ($cmkManaged) {
+                    Write-Pass "Workspace '$($ws.Name)' is using customer-managed keys"
+                } else {
+                    Write-Fail "Workspace '$($ws.Name)' is NOT using customer-managed keys (Microsoft-managed only)"
+                    $allGood = $false
+                }
+            }
+            if ($allGood) {
+                Add-Result "2.1.8" "Databricks CMK encryption" "PASS" "All workspaces use CMK"
+            } else {
+                Add-Result "2.1.8" "Databricks CMK encryption" "FAIL" "One or more workspaces without CMK"
+            }
+        } catch {
+            Write-Warn "Error: $($_.Exception.Message)"
+            Add-Result "2.1.8" "Databricks CMK encryption" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
 # ===============================================================================
 #  SECTION 5 - IDENTITY / ENTRA ID
 # ===============================================================================
@@ -882,20 +918,307 @@ function Check-6_1_2_11 {
 }
 
 function Check-6_1_3_1 {
-    Invoke-Check "6.1.3.1" "Ensure Application Insights is configured" {
+    Invoke-Check "6.1.3.1" "Ensure Application Insights is configured (on all App Services / Function Apps)" {
         try {
             $appInsights = @(Get-AzResource -ResourceType "Microsoft.Insights/components" -ErrorAction SilentlyContinue)
-            if ($appInsights.Count -gt 0) {
-                Write-Pass "Application Insights resource(s) found: $($appInsights.Count)"
-                foreach ($ai in $appInsights) { Write-Info "  - $($ai.Name) ($($ai.Location))" }
-                Add-Result "6.1.3.1" "Application Insights configured" "PASS" "$($appInsights.Count) resource(s) found"
+            Write-Info "Application Insights components in subscription: $($appInsights.Count)"
+
+            # Collect App Services (web apps) and Function Apps to verify coverage
+            $webApps = @(Get-AzResource -ResourceType "Microsoft.Web/sites" -ErrorAction SilentlyContinue)
+            if ($webApps.Count -eq 0) {
+                if ($appInsights.Count -gt 0) {
+                    Write-Pass "No App Services/Function Apps to evaluate; $($appInsights.Count) Application Insights resource(s) exist"
+                    Add-Result "6.1.3.1" "Application Insights configured" "PASS" "$($appInsights.Count) AI components; no web/function apps"
+                } else {
+                    Write-Info "No Application Insights resources and no App Services/Function Apps - check not applicable"
+                    Add-Result "6.1.3.1" "Application Insights configured" "INFO" "No AI components and no web/function apps"
+                }
+                return
+            }
+
+            $allGood = $true
+            $missing = @()
+            foreach ($app in $webApps) {
+                try {
+                    $detail = Get-AzResource -ResourceId $app.ResourceId -ExpandProperties -ErrorAction SilentlyContinue
+                    # Fetch app settings (these hold the AI instrumentation wiring)
+                    $settings = @{}
+                    try {
+                        $slot = Invoke-AzResourceAction -ResourceId "$($app.ResourceId)/config/appsettings" -Action list -Force -ErrorAction SilentlyContinue
+                        if ($slot -and $slot.properties) {
+                            foreach ($k in $slot.properties.PSObject.Properties.Name) { $settings[$k] = $slot.properties.$k }
+                        }
+                    } catch { }
+                    $hasKey = $settings.ContainsKey("APPINSIGHTS_INSTRUMENTATIONKEY") -and -not [string]::IsNullOrWhiteSpace($settings["APPINSIGHTS_INSTRUMENTATIONKEY"])
+                    $hasCs  = $settings.ContainsKey("APPLICATIONINSIGHTS_CONNECTION_STRING") -and -not [string]::IsNullOrWhiteSpace($settings["APPLICATIONINSIGHTS_CONNECTION_STRING"])
+                    if ($hasKey -or $hasCs) {
+                        Write-Pass "App '$($app.Name)' [$($app.ResourceGroupName)] has Application Insights configured"
+                    } else {
+                        Write-Fail "App '$($app.Name)' [$($app.ResourceGroupName)] is NOT configured with Application Insights"
+                        $missing += "$($app.ResourceGroupName)/$($app.Name)"
+                        $allGood = $false
+                    }
+                } catch {
+                    Write-Warn "Could not evaluate app '$($app.Name)': $($_.Exception.Message)"
+                    $allGood = $false
+                }
+            }
+            if ($allGood) {
+                Add-Result "6.1.3.1" "Application Insights configured" "PASS" "All $($webApps.Count) App Services/Function Apps configured with AI"
             } else {
-                Write-Fail "No Application Insights resources found"
-                Add-Result "6.1.3.1" "Application Insights configured" "FAIL" "No Application Insights resources"
+                Add-Result "6.1.3.1" "Application Insights configured" "FAIL" "Missing AI on: $($missing -join '; ')"
             }
         } catch {
             Write-Warn "Error: $($_.Exception.Message)"
             Add-Result "6.1.3.1" "Application Insights configured" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Check-6_1_1_3 {
+    Invoke-Check "6.1.1.3" "Ensure storage account for Activity Log export uses CMK encryption" {
+        try {
+            $diagSettings = @(Get-AzSubscriptionDiagnosticSetting -ErrorAction SilentlyContinue)
+            $storageIds = @($diagSettings | Where-Object { $_.StorageAccountId } | Select-Object -ExpandProperty StorageAccountId -Unique)
+            if ($storageIds.Count -eq 0) {
+                Write-Info "No subscription diagnostic setting exports to storage - check not applicable"
+                Add-Result "6.1.1.3" "Activity Log storage CMK" "INFO" "No storage-based activity log export"
+                return
+            }
+            $allGood = $true
+            foreach ($sid in $storageIds) {
+                $sa = Get-AzResource -ResourceId $sid -ExpandProperties -ErrorAction SilentlyContinue
+                if (-not $sa) {
+                    Write-Warn "Could not resolve storage account: $sid"
+                    $allGood = $false; continue
+                }
+                $keySource = $sa.Properties.encryption.keySource
+                if ($keySource -eq "Microsoft.Keyvault") {
+                    Write-Pass "Storage account '$($sa.Name)' uses customer-managed key (Key Vault)"
+                } else {
+                    Write-Fail "Storage account '$($sa.Name)' uses '$keySource' (expected Microsoft.Keyvault / CMK)"
+                    $allGood = $false
+                }
+            }
+            if ($allGood) {
+                Add-Result "6.1.1.3" "Activity Log storage CMK" "PASS" "All activity log storage accounts use CMK"
+            } else {
+                Add-Result "6.1.1.3" "Activity Log storage CMK" "FAIL" "One or more storage accounts not using CMK"
+            }
+        } catch {
+            Write-Warn "Error: $($_.Exception.Message)"
+            Add-Result "6.1.1.3" "Activity Log storage CMK" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Check-6_1_1_5 {
+    Invoke-Check "6.1.1.5" "Ensure NSG flow logs are captured and sent to Log Analytics (all NSGs)" {
+        try {
+            $allNSGs = @(Get-AzNetworkSecurityGroup -ErrorAction SilentlyContinue)
+            if ($allNSGs.Count -eq 0) {
+                Write-Info "No NSGs found - check not applicable"
+                Add-Result "6.1.1.5" "NSG flow logs to Log Analytics" "INFO" "No NSGs found"
+                return
+            }
+            $watchers = @(Get-AzNetworkWatcher -ErrorAction SilentlyContinue)
+            $allFlowLogs = @()
+            foreach ($watcher in $watchers) {
+                $allFlowLogs += @(Get-AzNetworkWatcherFlowLog -NetworkWatcher $watcher -ErrorAction SilentlyContinue)
+            }
+            $nsgFlowLogs = @($allFlowLogs | Where-Object { $_.TargetResourceId -match "Microsoft.Network/networkSecurityGroups" })
+            $allGood = $true
+            foreach ($nsg in $allNSGs) {
+                $fl = $nsgFlowLogs | Where-Object { $_.TargetResourceId.ToLower() -eq $nsg.Id.ToLower() } | Select-Object -First 1
+                if (-not $fl) {
+                    Write-Fail "NSG '$($nsg.Name)' has NO flow log configured"
+                    $allGood = $false; continue
+                }
+                $taEnabled = $false
+                $wsId = $null
+                if ($fl.FlowAnalyticsConfiguration -and $fl.FlowAnalyticsConfiguration.NetworkWatcherFlowAnalyticsConfiguration) {
+                    $ta = $fl.FlowAnalyticsConfiguration.NetworkWatcherFlowAnalyticsConfiguration
+                    $taEnabled = $ta.Enabled
+                    $wsId = $ta.WorkspaceResourceId
+                }
+                if ($taEnabled -and $wsId) {
+                    Write-Pass "NSG '$($nsg.Name)' flow log → Log Analytics workspace"
+                } else {
+                    Write-Fail "NSG '$($nsg.Name)' flow log exists but Traffic Analytics / Log Analytics not enabled"
+                    $allGood = $false
+                }
+            }
+            if ($allGood) {
+                Add-Result "6.1.1.5" "NSG flow logs to Log Analytics" "PASS" "All $($allNSGs.Count) NSGs send flow logs to Log Analytics"
+            } else {
+                Add-Result "6.1.1.5" "NSG flow logs to Log Analytics" "FAIL" "One or more NSGs missing flow log or Log Analytics sink"
+            }
+        } catch {
+            Write-Warn "Error: $($_.Exception.Message)"
+            Add-Result "6.1.1.5" "NSG flow logs to Log Analytics" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Check-6_1_1_7 {
+    Invoke-Check "6.1.1.7" "Ensure VNet flow logs are captured and sent to Log Analytics (all VNets)" {
+        try {
+            $allVNets = @(Get-AzVirtualNetwork -ErrorAction SilentlyContinue)
+            if ($allVNets.Count -eq 0) {
+                Write-Info "No VNets found - check not applicable"
+                Add-Result "6.1.1.7" "VNet flow logs to Log Analytics" "INFO" "No VNets found"
+                return
+            }
+            $watchers = @(Get-AzNetworkWatcher -ErrorAction SilentlyContinue)
+            $allFlowLogs = @()
+            foreach ($watcher in $watchers) {
+                $allFlowLogs += @(Get-AzNetworkWatcherFlowLog -NetworkWatcher $watcher -ErrorAction SilentlyContinue)
+            }
+            $vnetFlowLogs = @($allFlowLogs | Where-Object { $_.TargetResourceId -match "Microsoft.Network/virtualNetworks" })
+            $allGood = $true
+            foreach ($vnet in $allVNets) {
+                $fl = $vnetFlowLogs | Where-Object { $_.TargetResourceId.ToLower() -eq $vnet.Id.ToLower() } | Select-Object -First 1
+                if (-not $fl) {
+                    Write-Fail "VNet '$($vnet.Name)' (RG: $($vnet.ResourceGroupName)) has NO VNet flow log"
+                    $allGood = $false; continue
+                }
+                $taEnabled = $false
+                $wsId = $null
+                if ($fl.FlowAnalyticsConfiguration -and $fl.FlowAnalyticsConfiguration.NetworkWatcherFlowAnalyticsConfiguration) {
+                    $ta = $fl.FlowAnalyticsConfiguration.NetworkWatcherFlowAnalyticsConfiguration
+                    $taEnabled = $ta.Enabled
+                    $wsId = $ta.WorkspaceResourceId
+                }
+                if ($taEnabled -and $wsId) {
+                    Write-Pass "VNet '$($vnet.Name)' flow log → Log Analytics workspace"
+                } else {
+                    Write-Fail "VNet '$($vnet.Name)' flow log exists but Traffic Analytics / Log Analytics not enabled"
+                    $allGood = $false
+                }
+            }
+            if ($allGood) {
+                Add-Result "6.1.1.7" "VNet flow logs to Log Analytics" "PASS" "All $($allVNets.Count) VNets send flow logs to Log Analytics"
+            } else {
+                Add-Result "6.1.1.7" "VNet flow logs to Log Analytics" "FAIL" "One or more VNets missing flow log or Log Analytics sink"
+            }
+        } catch {
+            Write-Warn "Error: $($_.Exception.Message)"
+            Add-Result "6.1.1.7" "VNet flow logs to Log Analytics" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Check-6_1_1_8 {
+    Invoke-Check "6.1.1.8" "Ensure Entra diagnostic setting exists for Microsoft Graph activity logs" {
+        try {
+            # Tenant-scoped Azure AD diagnostic settings (Graph activity logs are a category under AAD diagnostic)
+            $uri = "https://management.azure.com/providers/microsoft.aadiam/diagnosticSettings?api-version=2017-04-01-preview"
+            $resp = Invoke-AzRestMethod -Uri $uri -Method GET -ErrorAction SilentlyContinue
+            if (-not $resp -or $resp.StatusCode -ne 200) {
+                Write-Warn "Unable to query tenant diagnostic settings (status: $($resp.StatusCode))"
+                Add-Result "6.1.1.8" "Entra Graph activity diagnostic" "WARN" "Could not query tenant diag settings"
+                return
+            }
+            $data = ($resp.Content | ConvertFrom-Json).value
+            if (-not $data -or $data.Count -eq 0) {
+                Write-Fail "No Entra (AADIAM) diagnostic settings found"
+                Add-Result "6.1.1.8" "Entra Graph activity diagnostic" "FAIL" "No AADIAM diagnostic settings"
+                return
+            }
+            $found = $false
+            foreach ($ds in $data) {
+                $logs = @($ds.properties.logs | Where-Object { $_.enabled -eq $true })
+                if ($logs | Where-Object { $_.category -in @("MicrosoftGraphActivityLogs","NetworkAccessTrafficLogs") }) {
+                    $found = $true
+                    Write-Pass "Diagnostic '$($ds.name)' captures MicrosoftGraphActivityLogs"
+                }
+            }
+            if ($found) {
+                Add-Result "6.1.1.8" "Entra Graph activity diagnostic" "PASS" "Graph activity logs captured"
+            } else {
+                Write-Fail "No AADIAM diagnostic setting has MicrosoftGraphActivityLogs enabled"
+                Add-Result "6.1.1.8" "Entra Graph activity diagnostic" "FAIL" "Not captured"
+            }
+        } catch {
+            Write-Warn "Error: $($_.Exception.Message)"
+            Add-Result "6.1.1.8" "Entra Graph activity diagnostic" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Check-6_1_1_9 {
+    Invoke-Check "6.1.1.9" "Ensure Entra diagnostic setting captures SignIn/Audit activity logs" {
+        try {
+            $uri = "https://management.azure.com/providers/microsoft.aadiam/diagnosticSettings?api-version=2017-04-01-preview"
+            $resp = Invoke-AzRestMethod -Uri $uri -Method GET -ErrorAction SilentlyContinue
+            if (-not $resp -or $resp.StatusCode -ne 200) {
+                Write-Warn "Unable to query tenant diagnostic settings (status: $($resp.StatusCode))"
+                Add-Result "6.1.1.9" "Entra activity diagnostic" "WARN" "Could not query tenant diag settings"
+                return
+            }
+            $data = ($resp.Content | ConvertFrom-Json).value
+            if (-not $data -or $data.Count -eq 0) {
+                Write-Fail "No Entra (AADIAM) diagnostic settings found"
+                Add-Result "6.1.1.9" "Entra activity diagnostic" "FAIL" "No AADIAM diagnostic settings"
+                return
+            }
+            $required = @("SignInLogs","AuditLogs")
+            $missing = @()
+            foreach ($cat in $required) {
+                $has = $false
+                foreach ($ds in $data) {
+                    $logs = @($ds.properties.logs | Where-Object { $_.enabled -eq $true -and $_.category -eq $cat })
+                    if ($logs.Count -gt 0) { $has = $true; break }
+                }
+                if (-not $has) { $missing += $cat }
+            }
+            if ($missing.Count -eq 0) {
+                Write-Pass "Entra diagnostic captures SignInLogs and AuditLogs"
+                Add-Result "6.1.1.9" "Entra activity diagnostic" "PASS" "SignIn + Audit captured"
+            } else {
+                Write-Fail "Missing Entra log categories: $($missing -join ', ')"
+                Add-Result "6.1.1.9" "Entra activity diagnostic" "FAIL" "Missing: $($missing -join ', ')"
+            }
+        } catch {
+            Write-Warn "Error: $($_.Exception.Message)"
+            Add-Result "6.1.1.9" "Entra activity diagnostic" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Check-6_1_1_10 {
+    Invoke-Check "6.1.1.10" "Ensure Intune logs are captured and sent to Log Analytics (Manual)" {
+        try {
+            # Intune diagnostic settings live under Microsoft.Intune; list via ARM
+            $uri = "https://management.azure.com/providers/microsoft.intune/diagnosticSettings?api-version=2017-04-01-preview"
+            $resp = Invoke-AzRestMethod -Uri $uri -Method GET -ErrorAction SilentlyContinue
+            if (-not $resp -or $resp.StatusCode -ne 200) {
+                Write-Warn "Intune diagnostic settings query returned status $($resp.StatusCode) - manual verification required"
+                Add-Result "6.1.1.10" "Intune logs to Log Analytics" "WARN" "Manual verification required"
+                return
+            }
+            $data = ($resp.Content | ConvertFrom-Json).value
+            if (-not $data -or $data.Count -eq 0) {
+                Write-Fail "No Intune diagnostic settings found"
+                Add-Result "6.1.1.10" "Intune logs to Log Analytics" "FAIL" "None configured"
+                return
+            }
+            $laFound = $false
+            foreach ($ds in $data) {
+                if ($ds.properties.workspaceId) {
+                    Write-Pass "Intune diagnostic '$($ds.name)' → Log Analytics workspace"
+                    $laFound = $true
+                }
+            }
+            if ($laFound) {
+                Add-Result "6.1.1.10" "Intune logs to Log Analytics" "PASS" "Intune logs sent to LAW"
+            } else {
+                Write-Fail "Intune diagnostic settings exist but none target Log Analytics"
+                Add-Result "6.1.1.10" "Intune logs to Log Analytics" "FAIL" "No LAW destination"
+            }
+        } catch {
+            Write-Warn "Error: $($_.Exception.Message) - manual verification required"
+            Add-Result "6.1.1.10" "Intune logs to Log Analytics" "WARN" "Manual verification"
         }
     }
 }
@@ -923,7 +1246,7 @@ function Check-7_4 {
 }
 
 function Check-7_5 {
-    Invoke-Check "7.5" "Ensure NSG flow log retention >= 90 days" {
+    Invoke-Check "7.5" "Ensure NSG flow log retention >= 90 days (all NSGs covered)" {
         try {
             $watchers = @(Get-AzNetworkWatcher -ErrorAction SilentlyContinue)
             if ($watchers.Count -eq 0) {
@@ -931,29 +1254,38 @@ function Check-7_5 {
                 Add-Result "7.5" "NSG flow log retention >= 90 days" "WARN" "No Network Watchers"
                 return
             }
-            $allGood = $true
-            $flowLogFound = $false
+            $allNSGs = @(Get-AzNetworkSecurityGroup -ErrorAction SilentlyContinue)
+            $allFlowLogs = @()
             foreach ($watcher in $watchers) {
-                $flowLogs = @(Get-AzNetworkWatcherFlowLog -NetworkWatcher $watcher -ErrorAction SilentlyContinue)
-                foreach ($fl in $flowLogs) {
-                    $flowLogFound = $true
-                    $retEnabled = $fl.RetentionPolicy.Enabled
-                    $retDays    = $fl.RetentionPolicy.Days
-                    if ($retEnabled -and $retDays -ge 90) {
-                        Write-Pass "Flow log '$($fl.Name)' retention: $retDays days"
-                    } else {
-                        Write-Fail "Flow log '$($fl.Name)' retention: $retDays days (Enabled: $retEnabled)"
-                        $allGood = $false
-                    }
+                $allFlowLogs += @(Get-AzNetworkWatcherFlowLog -NetworkWatcher $watcher -ErrorAction SilentlyContinue)
+            }
+            $nsgFlowLogs = @($allFlowLogs | Where-Object { $_.TargetResourceId -match "Microsoft.Network/networkSecurityGroups" })
+            $allGood = $true
+            # 1) retention check on each existing NSG flow log
+            foreach ($fl in $nsgFlowLogs) {
+                $retEnabled = $fl.RetentionPolicy.Enabled
+                $retDays    = $fl.RetentionPolicy.Days
+                if ($retEnabled -and $retDays -ge 90) {
+                    Write-Pass "Flow log '$($fl.Name)' retention: $retDays days"
+                } else {
+                    Write-Fail "Flow log '$($fl.Name)' retention: $retDays days (Enabled: $retEnabled)"
+                    $allGood = $false
                 }
             }
-            if (-not $flowLogFound) {
-                Write-Fail "No NSG flow logs configured"
-                Add-Result "7.5" "NSG flow log retention >= 90 days" "FAIL" "No flow logs found"
+            # 2) coverage check - every NSG must have a flow log
+            $coveredIds = @($nsgFlowLogs | Select-Object -ExpandProperty TargetResourceId) | ForEach-Object { $_.ToLower() }
+            $uncovered = @($allNSGs | Where-Object { $_.Id.ToLower() -notin $coveredIds })
+            foreach ($nsg in $uncovered) {
+                Write-Fail "NSG '$($nsg.Name)' (RG: $($nsg.ResourceGroupName)) has NO flow log configured"
+                $allGood = $false
+            }
+            if ($nsgFlowLogs.Count -eq 0 -and $allNSGs.Count -eq 0) {
+                Write-Info "No NSGs and no flow logs - check not applicable"
+                Add-Result "7.5" "NSG flow log retention >= 90 days" "INFO" "No NSGs found"
             } elseif ($allGood) {
-                Add-Result "7.5" "NSG flow log retention >= 90 days" "PASS" "All flow logs >= 90 days"
+                Add-Result "7.5" "NSG flow log retention >= 90 days" "PASS" "All $($allNSGs.Count) NSGs have flow logs >=90d retention"
             } else {
-                Add-Result "7.5" "NSG flow log retention >= 90 days" "FAIL" "Some flow logs < 90 days retention"
+                Add-Result "7.5" "NSG flow log retention >= 90 days" "FAIL" "$($uncovered.Count) NSG(s) without flow log; retention issues on existing logs"
             }
         } catch {
             Write-Warn "Error: $($_.Exception.Message)"
@@ -995,7 +1327,7 @@ function Check-7_6 {
 }
 
 function Check-7_8 {
-    Invoke-Check "7.8" "Ensure VNet flow log retention >= 90 days" {
+    Invoke-Check "7.8" "Ensure VNet flow log retention >= 90 days (all VNets covered)" {
         try {
             $watchers = @(Get-AzNetworkWatcher -ErrorAction SilentlyContinue)
             if ($watchers.Count -eq 0) {
@@ -1003,31 +1335,38 @@ function Check-7_8 {
                 Add-Result "7.8" "VNet flow log retention >= 90 days" "WARN" "No Network Watchers"
                 return
             }
-            $allGood = $true
-            $flowLogFound = $false
+            $allVNets = @(Get-AzVirtualNetwork -ErrorAction SilentlyContinue)
+            $allFlowLogs = @()
             foreach ($watcher in $watchers) {
-                $flowLogs = @(Get-AzNetworkWatcherFlowLog -NetworkWatcher $watcher -ErrorAction SilentlyContinue)
-                # Filter for VNet-targeted flow logs (TargetResourceId contains virtualNetworks)
-                $vnetFlowLogs = @($flowLogs | Where-Object { $_.TargetResourceId -match "Microsoft.Network/virtualNetworks" })
-                foreach ($fl in $vnetFlowLogs) {
-                    $flowLogFound = $true
-                    $retEnabled = $fl.RetentionPolicy.Enabled
-                    $retDays    = $fl.RetentionPolicy.Days
-                    if ($retEnabled -and $retDays -ge 90) {
-                        Write-Pass "VNet flow log '$($fl.Name)' retention: $retDays days"
-                    } else {
-                        Write-Fail "VNet flow log '$($fl.Name)' retention: $retDays days (Enabled: $retEnabled)"
-                        $allGood = $false
-                    }
+                $allFlowLogs += @(Get-AzNetworkWatcherFlowLog -NetworkWatcher $watcher -ErrorAction SilentlyContinue)
+            }
+            $vnetFlowLogs = @($allFlowLogs | Where-Object { $_.TargetResourceId -match "Microsoft.Network/virtualNetworks" })
+            $allGood = $true
+            # 1) retention check on each existing VNet flow log
+            foreach ($fl in $vnetFlowLogs) {
+                $retEnabled = $fl.RetentionPolicy.Enabled
+                $retDays    = $fl.RetentionPolicy.Days
+                if ($retEnabled -and $retDays -ge 90) {
+                    Write-Pass "VNet flow log '$($fl.Name)' retention: $retDays days"
+                } else {
+                    Write-Fail "VNet flow log '$($fl.Name)' retention: $retDays days (Enabled: $retEnabled)"
+                    $allGood = $false
                 }
             }
-            if (-not $flowLogFound) {
-                Write-Info "No VNet flow logs found - check not applicable"
-                Add-Result "7.8" "VNet flow log retention >= 90 days" "INFO" "No VNet flow logs found"
+            # 2) coverage check - every VNet must have a flow log
+            $coveredIds = @($vnetFlowLogs | Select-Object -ExpandProperty TargetResourceId) | ForEach-Object { $_.ToLower() }
+            $uncovered = @($allVNets | Where-Object { $_.Id.ToLower() -notin $coveredIds })
+            foreach ($vnet in $uncovered) {
+                Write-Fail "VNet '$($vnet.Name)' (RG: $($vnet.ResourceGroupName)) has NO VNet flow log configured"
+                $allGood = $false
+            }
+            if ($allVNets.Count -eq 0 -and $vnetFlowLogs.Count -eq 0) {
+                Write-Info "No VNets found - check not applicable"
+                Add-Result "7.8" "VNet flow log retention >= 90 days" "INFO" "No VNets found"
             } elseif ($allGood) {
-                Add-Result "7.8" "VNet flow log retention >= 90 days" "PASS" "All VNet flow logs >= 90 days"
+                Add-Result "7.8" "VNet flow log retention >= 90 days" "PASS" "All $($allVNets.Count) VNets have flow logs >=90d retention"
             } else {
-                Add-Result "7.8" "VNet flow log retention >= 90 days" "FAIL" "Some VNet flow logs < 90 days"
+                Add-Result "7.8" "VNet flow log retention >= 90 days" "FAIL" "$($uncovered.Count) VNet(s) without flow log; retention issues on existing logs"
             }
         } catch {
             Write-Warn "Error: $($_.Exception.Message)"
@@ -1220,6 +1559,96 @@ function Check-7_15 {
         } catch {
             Write-Warn "Error: $($_.Exception.Message)"
             Add-Result "7.15" "WAF bot protection" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Check-7_7 {
+    Invoke-Check "7.7" "Ensure Public IP addresses are evaluated on a periodic basis (list all Public IPs)" {
+        try {
+            $pips = @(Get-AzPublicIpAddress -ErrorAction SilentlyContinue)
+            if ($pips.Count -eq 0) {
+                Write-Info "No Public IP addresses found"
+                Add-Result "7.7" "Public IPs inventory" "INFO" "None found"
+                return
+            }
+            Write-Info "Found $($pips.Count) Public IP address(es). Manual review required:"
+            foreach ($ip in $pips) {
+                $assoc = if ($ip.IpConfiguration) { "associated" } else { "UNASSOCIATED" }
+                $addr  = if ($ip.IpAddress) { $ip.IpAddress } else { "<not assigned>" }
+                Write-Info "  - $($ip.Name) [$($ip.ResourceGroupName)] $addr ($($ip.PublicIpAllocationMethod), $assoc)"
+            }
+            Add-Result "7.7" "Public IPs inventory" "WARN" "$($pips.Count) Public IPs - manual review required"
+        } catch {
+            Write-Warn "Error: $($_.Exception.Message)"
+            Add-Result "7.7" "Public IPs inventory" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Check-7_9 {
+    Invoke-Check "7.9" "Ensure Azure AD authentication is configured on VPN Gateways (all gateways)" {
+        try {
+            $gatewayResources = @(Get-AzResource -ResourceType "Microsoft.Network/virtualNetworkGateways" -ErrorAction SilentlyContinue)
+            if ($gatewayResources.Count -eq 0) {
+                Write-Info "No VPN Gateways found - check not applicable"
+                Add-Result "7.9" "VPN Gateway AAD auth" "INFO" "No VPN Gateways"
+                return
+            }
+            $gateways = @()
+            foreach ($gr in $gatewayResources) {
+                $g = Get-AzVirtualNetworkGateway -ResourceGroupName $gr.ResourceGroupName -Name $gr.Name -ErrorAction SilentlyContinue
+                if ($g) { $gateways += $g }
+            }
+            $vpnGateways = @($gateways | Where-Object { $_.GatewayType -eq "Vpn" })
+            if ($vpnGateways.Count -eq 0) {
+                Write-Info "No VPN Gateways (GatewayType=Vpn) found - check not applicable"
+                Add-Result "7.9" "VPN Gateway AAD auth" "INFO" "No VPN Gateways"
+                return
+            }
+            $allGood = $true
+            foreach ($vg in $vpnGateways) {
+                $vpnClient = $vg.VpnClientConfiguration
+                if (-not $vpnClient) {
+                    Write-Fail "VPN Gateway '$($vg.Name)' has no P2S VPN client config - AAD auth N/A"
+                    $allGood = $false; continue
+                }
+                $authTypes = @($vpnClient.VpnAuthenticationTypes)
+                $aadTenant = $vpnClient.AadTenant
+                if ($authTypes -contains "AAD" -and $aadTenant) {
+                    Write-Pass "VPN Gateway '$($vg.Name)' uses AAD authentication (tenant: $aadTenant)"
+                } else {
+                    Write-Fail "VPN Gateway '$($vg.Name)' does NOT use AAD authentication (auth: $($authTypes -join ','))"
+                    $allGood = $false
+                }
+            }
+            if ($allGood) {
+                Add-Result "7.9" "VPN Gateway AAD auth" "PASS" "All VPN gateways use AAD auth"
+            } else {
+                Add-Result "7.9" "VPN Gateway AAD auth" "FAIL" "One or more VPN gateways without AAD auth"
+            }
+        } catch {
+            Write-Warn "Error: $($_.Exception.Message)"
+            Add-Result "7.9" "VPN Gateway AAD auth" "WARN" "Error: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Check-7_16 {
+    Invoke-Check "7.16" "Ensure Network Security Perimeter is used to protect PaaS resources (Manual)" {
+        try {
+            $perimeters = @(Get-AzResource -ResourceType "Microsoft.Network/networkSecurityPerimeters" -ErrorAction SilentlyContinue)
+            if ($perimeters.Count -eq 0) {
+                Write-Fail "No Network Security Perimeters found in subscription"
+                Add-Result "7.16" "Network Security Perimeter" "FAIL" "No NSPs configured"
+                return
+            }
+            Write-Pass "Found $($perimeters.Count) Network Security Perimeter(s). Manual review of associations required:"
+            foreach ($p in $perimeters) { Write-Info "  - $($p.Name) [$($p.ResourceGroupName)] ($($p.Location))" }
+            Add-Result "7.16" "Network Security Perimeter" "WARN" "$($perimeters.Count) NSP(s) found - manual review of associations required"
+        } catch {
+            Write-Warn "Error: $($_.Exception.Message) - manual verification required"
+            Add-Result "7.16" "Network Security Perimeter" "WARN" "Manual verification"
         }
     }
 }
@@ -1781,16 +2210,83 @@ function Check-8_3_11 {
 }
 
 function Check-8_4_1 {
-    Invoke-Check "8.4.1" "Ensure Azure Bastion Host exists" {
+    Invoke-Check "8.4.1" "Ensure Azure Bastion Host Exists (covers every VNet that has VMs)" {
         try {
             $bastions = @(Get-AzResource -ResourceType "Microsoft.Network/bastionHosts" -ErrorAction SilentlyContinue)
-            if ($bastions.Count -gt 0) {
-                Write-Pass "Azure Bastion host(s) found: $($bastions.Count)"
-                foreach ($b in $bastions) { Write-Info "  - $($b.Name) ($($b.Location))" }
-                Add-Result "8.4.1" "Azure Bastion exists" "PASS" "$($bastions.Count) Bastion host(s)"
+            $vms      = @(Get-AzVM -ErrorAction SilentlyContinue)
+            if ($bastions.Count -eq 0 -and $vms.Count -eq 0) {
+                Write-Info "No Bastion hosts and no VMs - check not applicable"
+                Add-Result "8.4.1" "Azure Bastion exists" "INFO" "No VMs and no Bastion"
+                return
+            }
+            if ($bastions.Count -eq 0) {
+                Write-Fail "No Azure Bastion hosts found, but $($vms.Count) VM(s) exist"
+                Add-Result "8.4.1" "Azure Bastion exists" "FAIL" "No Bastion hosts; $($vms.Count) VMs present"
+                return
+            }
+            Write-Pass "Azure Bastion host(s) found: $($bastions.Count)"
+            foreach ($b in $bastions) { Write-Info "  - $($b.Name) ($($b.Location))" }
+
+            # Build: map of VNetId -> bastion-present (either own Bastion or via peering)
+            $allVNets = @(Get-AzVirtualNetwork -ErrorAction SilentlyContinue)
+            $bastionVNetIds = New-Object System.Collections.Generic.HashSet[string]
+            foreach ($b in $bastions) {
+                $bDetail = Get-AzResource -ResourceId $b.ResourceId -ExpandProperties -ErrorAction SilentlyContinue
+                $ipConfigs = $bDetail.Properties.ipConfigurations
+                foreach ($ic in $ipConfigs) {
+                    $subnetId = $ic.properties.subnet.id
+                    if ($subnetId) {
+                        # VNet id is everything before /subnets/
+                        $vnetId = ($subnetId -split "/subnets/")[0]
+                        [void]$bastionVNetIds.Add($vnetId.ToLower())
+                    }
+                }
+            }
+            # Expand via peerings (a VNet is "covered" if it is peered to a VNet with a Bastion)
+            $coveredVNetIds = New-Object System.Collections.Generic.HashSet[string]
+            foreach ($id in $bastionVNetIds) { [void]$coveredVNetIds.Add($id) }
+            foreach ($vnet in $allVNets) {
+                foreach ($peer in @($vnet.VirtualNetworkPeerings)) {
+                    $remoteId = $peer.RemoteVirtualNetwork.Id
+                    if ($remoteId -and $bastionVNetIds.Contains($remoteId.ToLower())) {
+                        [void]$coveredVNetIds.Add($vnet.Id.ToLower())
+                    }
+                    if ($remoteId -and $vnet.Id -and $coveredVNetIds.Contains($vnet.Id.ToLower())) {
+                        [void]$coveredVNetIds.Add($remoteId.ToLower())
+                    }
+                }
+            }
+
+            # Find VNets that host VMs (via NICs)
+            $nics = @(Get-AzNetworkInterface -ErrorAction SilentlyContinue)
+            $vmVNetIds = New-Object System.Collections.Generic.HashSet[string]
+            foreach ($nic in $nics) {
+                if (-not $nic.VirtualMachine) { continue }
+                foreach ($ic in $nic.IpConfigurations) {
+                    $subnetId = $ic.Subnet.Id
+                    if ($subnetId) {
+                        $vnetId = ($subnetId -split "/subnets/")[0]
+                        [void]$vmVNetIds.Add($vnetId.ToLower())
+                    }
+                }
+            }
+
+            $allCovered = $true
+            foreach ($vnetId in $vmVNetIds) {
+                $vnetName = ($vnetId -split "/")[-1]
+                if ($coveredVNetIds.Contains($vnetId)) {
+                    Write-Pass "VNet '$vnetName' (hosts VMs) is covered by a Bastion host (same VNet or peered)"
+                } else {
+                    Write-Fail "VNet '$vnetName' hosts VMs but has NO Bastion host in same or peered VNet"
+                    $allCovered = $false
+                }
+            }
+            if ($vmVNetIds.Count -eq 0) {
+                Add-Result "8.4.1" "Azure Bastion exists" "PASS" "$($bastions.Count) Bastion host(s); no VM-hosting VNets to cover"
+            } elseif ($allCovered) {
+                Add-Result "8.4.1" "Azure Bastion exists" "PASS" "$($bastions.Count) Bastion host(s); all $($vmVNetIds.Count) VM-hosting VNets covered"
             } else {
-                Write-Fail "No Azure Bastion hosts found"
-                Add-Result "8.4.1" "Azure Bastion exists" "FAIL" "No Bastion hosts"
+                Add-Result "8.4.1" "Azure Bastion exists" "FAIL" "One or more VM-hosting VNets lack Bastion coverage"
             }
         } catch {
             Write-Warn "Error: $($_.Exception.Message)"
@@ -2494,7 +2990,7 @@ Clear-Host
 
 Write-Host ""
 Write-Host "+==================================================================================+" -ForegroundColor Cyan
-Write-Host "|   CIS Microsoft Azure Foundations Benchmark v5.0.0 - 93 Automated Checks         |" -ForegroundColor Cyan
+Write-Host "|   CIS Microsoft Azure Foundations Benchmark v5.0.0 - 103 Checks (Auto + Manual)    |" -ForegroundColor Cyan
 Write-Host "|   Subscription : $SubscriptionId                          |" -ForegroundColor Cyan
 Write-Host "+==================================================================================+" -ForegroundColor Cyan
 
@@ -2504,7 +3000,7 @@ Connect-AllServices
 $Script:AllNSGs = @(Get-AzNetworkSecurityGroup -ErrorAction SilentlyContinue)
 
 Write-Banner "SECTION 2 - Databricks"
-Check-2_1_1;  Check-2_1_2;  Check-2_1_7
+Check-2_1_1;  Check-2_1_2;  Check-2_1_7; Check-2_1_8
 Check-2_1_9;  Check-2_1_10; Check-2_1_11
 
 Write-Banner "SECTION 5 - Identity / Entra ID"
@@ -2513,7 +3009,9 @@ Check-5_4;    Check-5_14;   Check-5_15;  Check-5_16
 Check-5_23;   Check-5_27
 
 Write-Banner "SECTION 6 - Logging & Monitoring"
-Check-6_1_1_1;  Check-6_1_1_2;  Check-6_1_1_4;  Check-6_1_1_6
+Check-6_1_1_1;  Check-6_1_1_2;  Check-6_1_1_3;  Check-6_1_1_4
+Check-6_1_1_5;  Check-6_1_1_6;  Check-6_1_1_7
+Check-6_1_1_8;  Check-6_1_1_9;  Check-6_1_1_10
 Check-6_1_2_1;  Check-6_1_2_2;  Check-6_1_2_3;  Check-6_1_2_4;  Check-6_1_2_5
 Check-6_1_2_6;  Check-6_1_2_7;  Check-6_1_2_8;  Check-6_1_2_9;  Check-6_1_2_10
 Check-6_1_2_11; Check-6_1_3_1
@@ -2523,9 +3021,9 @@ Check-7_1  -NSGs $Script:AllNSGs
 Check-7_2  -NSGs $Script:AllNSGs
 Check-7_3  -NSGs $Script:AllNSGs
 Check-7_4  -NSGs $Script:AllNSGs
-Check-7_5;    Check-7_6;    Check-7_8
+Check-7_5;    Check-7_6;    Check-7_7;   Check-7_8;   Check-7_9
 Check-7_10;   Check-7_11;   Check-7_12;  Check-7_13
-Check-7_14;   Check-7_15
+Check-7_14;   Check-7_15;   Check-7_16
 
 Write-Banner "SECTION 8 - Security (Defender, Key Vault, Bastion, DDoS)"
 Check-8_1_1_1;  Check-8_1_2_1;  Check-8_1_3_1;  Check-8_1_3_3

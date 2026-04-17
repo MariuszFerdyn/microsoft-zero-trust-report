@@ -6,7 +6,7 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 
 | Benchmark | Version | Automated Checks | Script | Permissions Helper |
 |-----------|---------|------------------:|--------|--------------------|
-| CIS Microsoft Azure Foundations | v5.0.0 | 93 | `CIS_Azure_Benchmark_Full.ps1` | `CIS_Azure_Permissions.ps1` |
+| CIS Microsoft Azure Foundations | v5.0.0 | 103 | `CIS_Azure_Benchmark_Full.ps1` | `CIS_Azure_Permissions.ps1` |
 | CIS Microsoft 365 Foundations | v6.0.1 | 129 | `CIS_M365_Benchmark_Full.ps1` | `CIS_M365_Permissions.ps1` |
 
 ---
@@ -17,12 +17,18 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 
 | Section | Area | Checks |
 |---------|------|-------:|
-| 2 | Databricks | 6 |
+| 2 | Databricks | 7 |
 | 5 | Identity / Entra ID | 9 |
-| 6 | Logging & Monitoring | 16 |
-| 7 | Networking | 14 |
+| 6 | Logging & Monitoring | 22 |
+| 7 | Networking | 17 |
 | 8 | Security (Defender, Key Vault, Bastion, DDoS) | 30 |
 | 9 | Storage | 18 |
+
+> **Multi-resource coverage:** checks that target resource types which can exist more than once
+> (Databricks workspaces, NSGs, VNets, Bastion hosts, VPN Gateways, App Services, Public IPs, Storage
+> accounts, etc.) iterate **every** instance in the subscription and report per-resource results.
+> For example, Bastion coverage is validated per VNet that hosts VMs (same VNet or peered), and NSG
+> and VNet flow logs are verified for every NSG/VNet — not just the first one found.
 
 ### Prerequisites
 
@@ -30,6 +36,11 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 Install-Module Az               -Scope CurrentUser -Force
 Install-Module Microsoft.Graph   -Scope CurrentUser -Force
 ```
+
+> Or let `CIS_Azure_Permissions.ps1` install them for you. It installs the required sub-modules
+> (`Az.Accounts`, `Az.Resources`, `Az.Security`, `Az.Network`, `Az.Monitor`, `Az.KeyVault`,
+> `Az.Storage`, `Az.Websites`, `Az.ApplicationInsights`, `Az.Compute`, plus
+> `Microsoft.Graph.Identity.SignIns` and `Microsoft.Graph.Identity.DirectoryManagement`).
 
 ### Permissions Setup
 
@@ -60,6 +71,10 @@ The script assigns:
     -ClientId       "<app-id>" `
     -ClientSecret   "<secret>"
 ```
+
+> At the end of `CIS_Azure_Permissions.ps1` the generated client secret is printed and the ready-to-run
+> command line is displayed. You are also prompted **"Run benchmark now? [Y/N]"** — answering `Y` will
+> launch `CIS_Azure_Benchmark_Full.ps1` immediately with the newly created credentials.
 
 Results are saved to a timestamped CSV file: `CIS_Azure_Results_<date>.csv`
 

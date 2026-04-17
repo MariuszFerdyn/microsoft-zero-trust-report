@@ -27,7 +27,7 @@
 
     Required PowerShell Modules:
       Az.Accounts, Az.Resources, Az.Security, Az.Network, Az.Monitor,
-      Az.KeyVault, Az.Storage, Az.Websites, Az.ApplicationInsights,
+      Az.KeyVault, Az.Storage, Az.Websites, Az.ApplicationInsights, Az.Compute,
       Microsoft.Graph.Identity.SignIns,
       Microsoft.Graph.Identity.DirectoryManagement
 
@@ -346,6 +346,7 @@ if (-not $SkipModuleInstall) {
         "Az.Storage",
         "Az.Websites",
         "Az.ApplicationInsights",
+        "Az.Compute",
         "Microsoft.Graph.Identity.SignIns",
         "Microsoft.Graph.Identity.DirectoryManagement"
     )
@@ -414,11 +415,12 @@ Write-Host "  To run the CIS Azure Foundations Benchmark:" -ForegroundColor Whit
 Write-Host ""
 
 if ($AppId -and $AppId -ne "SKIPPED") {
+    $secretDisplay = if ($clientSecret) { $clientSecret } else { "<NOT_CREATED - re-run without -NoSecret>" }
     Write-Host "    .\CIS_Azure_Benchmark_Full.ps1 ``" -ForegroundColor Yellow
     Write-Host "        -TenantId `"$TenantId`" ``" -ForegroundColor Yellow
     Write-Host "        -SubscriptionId `"$SubscriptionId`" ``" -ForegroundColor Yellow
     Write-Host "        -ClientId `"$AppId`" ``" -ForegroundColor Yellow
-    Write-Host "        -ClientSecret `"<from output JSON>`"" -ForegroundColor Yellow
+    Write-Host "        -ClientSecret `"$secretDisplay`"" -ForegroundColor Yellow
 } else {
     Write-Host "    .\CIS_Azure_Benchmark_Full.ps1 ``" -ForegroundColor Yellow
     Write-Host "        -TenantId `"$TenantId`" ``" -ForegroundColor Yellow
@@ -428,3 +430,16 @@ if ($AppId -and $AppId -ne "SKIPPED") {
 Write-Host ""
 Write-Host "  Configuration saved to: $OutputPath" -ForegroundColor Gray
 Write-Host ""
+
+if (-not $NoPause -and $AppId -and $AppId -ne "SKIPPED" -and $clientSecret) {
+    $runNow = Read-Host '  Run benchmark now? [Y/N]'
+    if ($runNow -match '^[Yy]') {
+        $benchmarkPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'CIS_Azure_Benchmark_Full.ps1'
+        if (Test-Path $benchmarkPath) {
+            & $benchmarkPath -TenantId $TenantId -SubscriptionId $SubscriptionId -ClientId $AppId -ClientSecret $clientSecret
+        } else {
+            Write-Warn "Script not found: $benchmarkPath"
+            Write-Detail "Make sure both scripts are in the same directory."
+        }
+    }
+}
