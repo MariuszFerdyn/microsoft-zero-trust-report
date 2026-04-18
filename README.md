@@ -32,6 +32,11 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 
 ### Prerequisites
 
+- **Azure CLI (`az`)** — required by `CIS_Azure_Permissions.ps1` to create the App Registration,
+  Service Principal, RBAC role assignments, and Graph permission grants.
+  Install from <https://learn.microsoft.com/cli/azure/install-azure-cli> (or `winget install Microsoft.AzureCLI`),
+  then sign in with `az login --tenant <tenant-guid>`.
+
 ```powershell
 Install-Module Az               -Scope CurrentUser -Force
 Install-Module Microsoft.Graph   -Scope CurrentUser -Force
@@ -98,12 +103,22 @@ Results are saved to a timestamped CSV file: `CIS_Azure_Results_<date>.csv`
 
 ### Prerequisites
 
+- **Azure CLI (`az`)** — required by `CIS_Azure_Permissions.ps1` to create the App Registration,
+  Service Principal, RBAC role assignments, and Graph permission grants.
+  Install from <https://learn.microsoft.com/cli/azure/install-azure-cli> (or `winget install Microsoft.AzureCLI`),
+  then sign in with `az login --tenant <tenant-guid>`.
+- **PowerShell modules:**
+
 ```powershell
 Install-Module Microsoft.Graph                          -Scope CurrentUser -Force
 Install-Module ExchangeOnlineManagement                 -Scope CurrentUser -Force
 Install-Module MicrosoftTeams                           -Scope CurrentUser -Force
 Install-Module Microsoft.Online.SharePoint.PowerShell   -Scope CurrentUser -Force
 ```
+
+> **Tenants without an Azure subscription** (Microsoft 365 / Office 365-only): sign in with
+> `az login --tenant <tenant-guid> --allow-no-subscriptions`. The M365 permissions helper only
+> needs Microsoft Graph access and does not require an Azure subscription.
 
 ### Permissions Setup
 
@@ -157,6 +172,86 @@ Results are saved to a timestamped CSV file: `CIS_M365_Results_<date>.csv`
 Both benchmark scripts produce:
 - **Console output** with color-coded results: `[PASS]`, `[FAIL]`, `[WARN]`, `[SKIP]`
 - **CSV report** with columns: Section, Title, Status, Detail
+
+### Sample console output (M365 benchmark)
+
+```text
+----------------------------------------------------------------------------------
+ SECTION 1 - Microsoft 365 Admin Center
+----------------------------------------------------------------------------------
+
+ [1.1.1 (L1)] Ensure Administrative accounts are cloud-only (Automated)
+ [PASS] No hybrid-synced users found in privileged roles.
+
+ [1.1.3 (L1)] Ensure between two and four global admins are designated (Automated)
+ Global Admins found: 6
+ -> MOD Administrator | admin@M365x55944128.onmicrosoft.com
+ -> Allan Deyoung | AllanD@M365x55944128.OnMicrosoft.com
+ -> Nestor Wilke | NestorW@M365x55944128.OnMicrosoft.com
+ -> Isaiah Langer | IsaiahL@M365x55944128.OnMicrosoft.com
+ -> Megan Bowen | MeganB@M365x55944128.OnMicrosoft.com
+ -> Lidia Holloway | LidiaH@M365x55944128.OnMicrosoft.com
+ [FAIL] 6 Global Admins - maximum is 4. Reduce privileged access.
+
+ [1.1.4 (L1)] Ensure admin accounts use licenses with reduced application footprint (Automated)
+ Checking privileged users for assigned service plans (Teams, Exchange, SharePoint)...
+ -> MOD Administrator: Microsoft Teams, SharePoint Online (Plan 1) [E3], SharePoint Online (Plan 1), Exchange Online (Plan 1)
+ -> Allan Deyoung: Microsoft Teams, SharePoint Online (Plan 1) [E3], SharePoint Online (Plan 1), Exchange Online (Plan 1)
+ -> Nestor Wilke: Microsoft Teams, SharePoint Online (Plan 1) [E3], SharePoint Online (Plan 1), Exchange Online (Plan 1)
+ -> Isaiah Langer: Microsoft Teams, SharePoint Online (Plan 1) [E3], SharePoint Online (Plan 1), Exchange Online (Plan 1)
+ -> Megan Bowen: Microsoft Teams, SharePoint Online (Plan 1) [E3], SharePoint Online (Plan 1), Exchange Online (Plan 1)
+ -> Lidia Holloway: Microsoft Teams, SharePoint Online (Plan 1) [E3], SharePoint Online (Plan 1), Exchange Online (Plan 1)
+ [FAIL] 6 admin(s) have productivity services assigned.
+ Recommendation: Create dedicated cloud-only admin accounts without productivity licenses.
+
+ [1.2.1 (L2)] Ensure only organizationally managed/approved public groups exist (Automated)
+ Retrieving all Unified (M365) groups (client-side visibility filter)...
+ Total M365 groups: 14, Public: 6
+ [WARN] 6 public M365 group(s) - verify each is organizationally approved:
+ -> All Company | allcompany@M365x55944128.onmicrosoft.com
+ -> Sales and Marketing | SalesAndMarketing@M365x55944128.onmicrosoft.com
+ -> Mark 8 Project Team | Mark8ProjectTeam@M365x55944128.onmicrosoft.com
+ -> New Employee Onboarding | newemployeeonboarding@M365x55944128.onmicrosoft.com
+ -> Contoso marketing | Contosomarketing@M365x55944128.onmicrosoft.com
+ -> Remote living | Remoteliving@M365x55944128.onmicrosoft.com
+
+ [1.2.2 (L1)] Ensure sign-in to shared mailboxes is blocked (Automated)
+ [PASS] All 0 shared mailbox(es) have sign-in blocked.
+
+ [1.3.1 (L1)] Ensure the Password expiration policy is set to never expire (Automated)
+ [PASS] All verified domains have 'Never expire' password policy (value = 2147483647).
+
+ [1.3.2 (L2)] Ensure 'Idle session timeout' is set to 3 hours or less (Automated)
+ [FAIL] No Activity-Based Timeout policy found - idle session timeout is not configured.
+ Remediation: Entra ID > Properties > Manage security defaults > Session timeout
+
+ [1.3.3 (L2)] Ensure external sharing of calendars is not available (Automated)
+ [FAIL] External calendar sharing policy allows anonymous access:
+ -> Default Sharing Policy: Anonymous:CalendarSharingFreeBusyReviewer *:CalendarSharingFreeBusySimple
+
+ [1.3.4 (L1)] Ensure 'User owned apps and services' is restricted (Automated)
+ AllowedToCreateApps : True
+ [FAIL] Users CAN create apps (AllowedToCreateApps = True). Restrict this setting.
+ Remediation: Entra ID > User settings > App registrations > No
+
+ [1.3.5 (L1)] Ensure internal phishing protection for Forms is enabled (Automated)
+ isInOrgFormsPhishingScanEnabled: True
+ [PASS] Internal phishing protection for Forms is ENABLED.
+
+ [1.3.6 (L2)] Ensure the customer lockbox feature is enabled (Automated)
+ CustomerLockBoxEnabled: False
+ [FAIL] Customer Lockbox is NOT enabled.
+ Remediation: M365 Admin Center > Settings > Org Settings > Security & Privacy > Customer Lockbox > On
+
+ [1.3.7 (L2)] Ensure third-party storage services are restricted in Microsoft 365 (Automated)
+ [PASS] Third-party storage service principal not found in tenant (not added = restricted).
+
+ [1.3.9 (L1)] Ensure shared Bookings pages are restricted to select users (Automated)
+ BookingsMailboxCreationEnabled: True
+ BookingsEnabled (org)         : True
+ [FAIL] Any user can create Bookings pages (BookingsMailboxCreationEnabled = True).
+ Remediation: Exchange Admin > Settings > Bookings > restrict to specific users
+```
 
 ## License
 

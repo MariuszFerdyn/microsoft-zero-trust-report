@@ -592,12 +592,27 @@ if ($IncludeExchange) {
 
   $exoUpn = $ExchangeAdminUPN
   if (-not $exoUpn -and -not $NoPause) {
-    $exoUpn = Read-Host "  Exchange admin UPN (e.g. admin@tenant.com)  [blank = skip this step]"
+    Write-Host ''
+    Write-Host '  Exchange admin UPN is needed only to auto-register the SP in Exchange Online.' -ForegroundColor DarkGray
+    Write-Host '  Press Enter with no value to SKIP Exchange setup (benchmark will run in -GraphOnlyMode).' -ForegroundColor DarkGray
+    $exoUpn = Read-Host "  Exchange admin UPN (e.g. admin@tenant.com)  [Enter = skip]"
+    if ($exoUpn) { $exoUpn = $exoUpn.Trim() }
   }
 
-  $exoNeedsManualConfirm = $false
-
-  if ($exoUpn) {
+  if (-not $exoUpn) {
+    # User pressed Enter (or -NoPause without -ExchangeAdminUPN) - clean skip
+    Write-Warn 'Exchange Online setup skipped (no ExchangeAdminUPN supplied).'
+    Write-Info 'To enable EXO checks later, run these commands manually as Exchange admin:'
+    $domainVar = Get-Variable -Name 'domain' -ValueOnly -ErrorAction SilentlyContinue
+    $manualUpn = if ($domainVar -and $domainVar -notmatch 'YOUR-TENANT') { "admin@$domainVar" } else { 'admin@yourtenant.com' }
+    Write-Info "  Connect-ExchangeOnline -UserPrincipalName $manualUpn"
+    Write-Info "  New-ServicePrincipal -AppId '$AppId' -ObjectId '$spObjId' -DisplayName '$AppName'"
+    Write-Info "  Add-RoleGroupMember -Identity 'View-Only Organization Management' -Member '$spObjId'"
+    Write-Info "  Disconnect-ExchangeOnline -Confirm:`$false"
+    Write-Info 'Then re-run this script with -ExchangeAdminUPN, or pass -IncludeExchange:$false to suppress this prompt.'
+    $IncludeExchange = $false
+  } else {
+    $exoAutomated = $false
     try {
       if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement -ErrorAction SilentlyContinue)) {
         Write-Warn "ExchangeOnlineManagement module not found. Installing..."
@@ -635,7 +650,7 @@ if ($IncludeExchange) {
 
       Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
       Write-Ok "Exchange Online disconnected"
-      # Automated setup completed -- no manual confirmation needed
+      $exoAutomated = $true
     } catch {
       Write-Warn "Exchange Online setup failed: $($_.Exception.Message)"
       Write-Info "Run manually as Exchange admin:"
@@ -643,29 +658,21 @@ if ($IncludeExchange) {
       Write-Info "  New-ServicePrincipal -AppId '$AppId' -ObjectId '$spObjId' -DisplayName '$AppName'"
       Write-Info "  Add-RoleGroupMember -Identity 'View-Only Organization Management' -Member '$spObjId'"
       Write-Info "  Disconnect-ExchangeOnline -Confirm:`$false"
-      $exoNeedsManualConfirm = $true
     }
-  } else {
-    $manualUpn = if ($domain -and $domain -notmatch 'YOUR-TENANT') { "admin@$domain" } else { 'admin@yourtenant.com' }
-    Write-Warn "ExchangeAdminUPN not supplied - run these commands manually as Exchange admin:"
-    Write-Info "  Connect-ExchangeOnline -UserPrincipalName $manualUpn"
-    Write-Info "  New-ServicePrincipal -AppId '$AppId' -ObjectId '$spObjId' -DisplayName '$AppName'"
-    Write-Info "  Add-RoleGroupMember -Identity 'View-Only Organization Management' -Member '$spObjId'"
-    Write-Info "  Disconnect-ExchangeOnline -Confirm:`$false"
-    $exoNeedsManualConfirm = $true
-  }
 
-  # Only ask for manual confirmation when the script couldn't do it automatically
-  if ($exoNeedsManualConfirm -and -not $NoPause) {
-    Write-Host ''
-    Write-Host '  Have you run it manually?' -ForegroundColor Cyan
-    Write-Host '  If so, type  continue  and press Enter to proceed.' -ForegroundColor Cyan
-    Write-Host '  You can also skip by pressing Enter -- Exchange Online will NOT be examined in the benchmark.' -ForegroundColor DarkGray
-    Write-Host ''
-    $exoAnswer = Read-Host '  Your answer'
-    if ($exoAnswer -notmatch '^\s*continue\s*$') {
-      Write-Warn 'EXO step skipped -- Exchange Online will be excluded from the benchmark command.'
-      $IncludeExchange = [switch]::new($false)
+    # If automated setup failed, offer a single clear prompt to confirm manual completion
+    if (-not $exoAutomated -and -not $NoPause) {
+      Write-Host ''
+      Write-Host '  Did you run the manual EXO commands above?' -ForegroundColor Cyan
+      Write-Host "  Type 'y' (or 'continue') and Enter to include Exchange in the benchmark." -ForegroundColor Cyan
+      Write-Host '  Press Enter to skip Exchange (benchmark will run in -GraphOnlyMode).' -ForegroundColor DarkGray
+      $exoAnswer = Read-Host '  Your answer [y/N]'
+      if ($exoAnswer -match '^\s*(y|yes|continue)\s*$') {
+        Write-Ok 'EXO will be included in the benchmark command.'
+      } else {
+        Write-Warn 'EXO step skipped -- Exchange Online will be excluded from the benchmark command.'
+        $IncludeExchange = $false
+      }
     }
   }
 }
