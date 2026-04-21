@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     CIS Microsoft Azure Foundations Benchmark v5.0.0 - Permissions Setup
 
@@ -64,6 +64,13 @@ param(
     [string]$AppId,
 
     [Parameter(Mandatory = $false)]
+    # Retained for backward compatibility. Secret creation is on by default,
+    # so this switch is now a no-op and will be removed in a future release.
+    [switch]$CreateSecret,
+
+    [Parameter(Mandatory = $false)]
+    # Skip client-secret creation on this run (use when rotating secrets
+    # manually or when only updating role assignments).
     [switch]$NoSecret,
 
     [Parameter(Mandatory = $false)]
@@ -128,18 +135,54 @@ function Repair-AzLogin([string]$ExpectedTenantId) {
 
 function Invoke-Az {
     param([string[]]$Arguments, [switch]$AllowFailure)
-    $raw = & az @Arguments 2>&1
+    # Suppress az WARNING lines (e.g. the credentials-warning emitted by
+    # 'ad app credential reset') at the source. A few az subcommands reject
+    # the flag, so only append it when the caller has not supplied a
+    # conflicting verbosity switch.
+    if (($Arguments -notcontains '--only-show-errors') -and
+        ($Arguments -notcontains '--verbose') -and
+        ($Arguments -notcontains '--debug')) {
+        $Arguments = @($Arguments) + '--only-show-errors'
+    }
+    # Azure CLI writes warnings to stderr even on success; with
+    # $ErrorActionPreference = 'Stop' Windows PowerShell 5.1 would render that
+    # stderr as a red NativeCommandError. Switch EAP to 'Continue' for the
+    # native call and use $LASTEXITCODE for failure detection.
+    $prevEap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $raw = & az @Arguments 2>&1
+    } finally { $ErrorActionPreference = $prevEap }
     $code = $LASTEXITCODE
-    $stderr = ($raw | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }) -join "`n"
-    $stdout = ($raw | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
+    $stderr = (
+        $raw |
+            Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
+            ForEach-Object { $_.Exception.Message }
+    ) -join "`n"
+    $stdout = (
+        $raw |
+            Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } |
+            ForEach-Object { [string]$_ }
+    ) -join "`n"
 
     if ($code -ne 0) {
         if (Test-AzAuthError $stderr) {
             Repair-AzLogin $TenantId
-            $raw = & az @Arguments 2>&1
+            try {
+                $ErrorActionPreference = 'Continue'
+                $raw = & az @Arguments 2>&1
+            } finally { $ErrorActionPreference = $prevEap }
             $code = $LASTEXITCODE
-            $stderr = ($raw | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }) -join "`n"
-            $stdout = ($raw | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
+            $stderr = (
+                $raw |
+                    Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
+                    ForEach-Object { $_.Exception.Message }
+            ) -join "`n"
+            $stdout = (
+                $raw |
+                    Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } |
+                    ForEach-Object { [string]$_ }
+            ) -join "`n"
         }
         if ($code -ne 0 -and -not $AllowFailure) {
             throw "az $($Arguments -join ' ') failed (exit $code): $stderr"
@@ -231,7 +274,9 @@ if ($SkipGraphPermissions) {
     }
     $spObjectId = $sp.id
 
-    # Create client secret
+    # Always mint a fresh client secret so the printed benchmark command
+    # is ready to run. Operators who want to skip rotation can pass
+    # -NoSecret (e.g. when only updating role assignments).
     $clientSecret = $null
     if (-not $NoSecret) {
         Write-Detail "Creating client secret (valid for $SecretYears year(s))..."
@@ -439,15 +484,32 @@ Write-Host ""
 Write-Host "  Configuration saved to: $OutputPath" -ForegroundColor Gray
 Write-Host ""
 
-if (-not $NoPause -and $AppId -and $AppId -ne "SKIPPED" -and $clientSecret) {
+if (-not $NoPause -and $AppId -and $AppId -ne "SKIPPED") {
     $runNow = Read-Host '  Run benchmark now? [Y/N]'
     if ($runNow -match '^[Yy]') {
-        $benchmarkPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'CIS_Azure_Benchmark_Full.ps1'
-        if (Test-Path $benchmarkPath) {
-            & $benchmarkPath -TenantId $TenantId -SubscriptionId $SubscriptionId -ClientId $AppId -ClientSecret $clientSecret
+        $secretForRun = $clientSecret
+        if (-not $secretForRun) {
+            Write-Host ""
+            Write-Host "  No client secret was created this run (-NoSecret was passed)." -ForegroundColor DarkYellow
+            Write-Host "  Paste an existing client secret for app $AppId to run the benchmark now," -ForegroundColor DarkYellow
+            Write-Host "  or press Enter to skip." -ForegroundColor DarkYellow
+            $secureSecret = Read-Host '  ClientSecret' -AsSecureString
+            if ($secureSecret.Length -gt 0) {
+                $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
+                try { $secretForRun = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
+                finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+            }
+        }
+        if (-not $secretForRun) {
+            Write-Warn "No client secret provided -- benchmark run skipped."
         } else {
-            Write-Warn "Script not found: $benchmarkPath"
-            Write-Detail "Make sure both scripts are in the same directory."
+            $benchmarkPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'CIS_Azure_Benchmark_Full.ps1'
+            if (Test-Path $benchmarkPath) {
+                & $benchmarkPath -TenantId $TenantId -SubscriptionId $SubscriptionId -ClientId $AppId -ClientSecret $secretForRun
+            } else {
+                Write-Warn "Script not found: $benchmarkPath"
+                Write-Detail "Make sure both scripts are in the same directory."
+            }
         }
     }
 }

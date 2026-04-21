@@ -62,6 +62,13 @@ param(
   [string]$AppId,
 
   [Parameter(Mandatory = $false)]
+  # Retained for backward compatibility. Secret creation is on by default,
+  # so this switch is now a no-op and will be removed in a future release.
+  [switch]$CreateSecret,
+
+  [Parameter(Mandatory = $false)]
+  # Skip client-secret creation on this run (use when rotating secrets
+  # manually or when only updating role assignments).
   [switch]$NoSecret,
 
   [Parameter(Mandatory = $false)]
@@ -189,7 +196,13 @@ function Invoke-Az {
   $prevEap = $ErrorActionPreference
   try {
     $ErrorActionPreference = 'Continue'
-    $output = & az @AzArgs 2>&1
+    $azArgsWithFlag = $AzArgs
+    if (($AzArgs -notcontains '--only-show-errors') -and
+        ($AzArgs -notcontains '--verbose') -and
+        ($AzArgs -notcontains '--debug')) {
+      $azArgsWithFlag = @($AzArgs) + '--only-show-errors'
+    }
+    $output = & az @azArgsWithFlag 2>&1
   } finally {
     $ErrorActionPreference = $prevEap
   }
@@ -437,7 +450,9 @@ if ($spResult.Created) {
 Write-Ok "ObjectId (SP): $spObjId"
 Wait-Step
 
-Write-Section "Create client secret (optional)"
+Write-Section "Create client secret"
+# Always mint a fresh client secret so the printed benchmark command is
+# ready to run. Pass -NoSecret to skip (e.g. when rotating manually).
 $secret = $null
 if (-not $NoSecret) {
   $secret = Invoke-Az -AzArgs @(
@@ -452,7 +467,7 @@ if (-not $NoSecret) {
   Write-Warn "This is the ONLY time you can retrieve the secret value."
   Write-Host "  Secret: $secret" -ForegroundColor Magenta
 } else {
-  Write-Info "Skipped creating secret"
+  Write-Info "Skipped creating secret (-NoSecret was passed)"
 }
 Wait-Step
 
@@ -1065,20 +1080,37 @@ Write-Host ''
 if (-not $NoPause) {
   $runNow = Read-Host '  Run benchmark now? [Y/N]'
   if ($runNow -match '^[Yy]') {
-    $benchmarkPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'CIS_M365_Benchmark_Full.ps1'
-    if (Test-Path $benchmarkPath) {
-      $benchmarkArgs = @{
-        TenantId           = $TenantId
-        AppId              = $AppId
-        AppSecret          = $secretDisplay
-        TenantDomain       = $domain
-        SharePointAdminUrl = $spoUrl
+    $secretForRun = $secret
+    if (-not $secretForRun) {
+      Write-Host ''
+      Write-Host '  No client secret was created this run (-NoSecret was passed).' -ForegroundColor DarkYellow
+      Write-Host "  Paste an existing client secret for app $AppId to run the benchmark now," -ForegroundColor DarkYellow
+      Write-Host '  or press Enter to skip.' -ForegroundColor DarkYellow
+      $secureSecret = Read-Host '  AppSecret' -AsSecureString
+      if ($secureSecret.Length -gt 0) {
+        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
+        try { $secretForRun = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
+        finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
       }
-      if (-not $IncludeExchange) { $benchmarkArgs['GraphOnlyMode'] = $true }
-      & $benchmarkPath @benchmarkArgs
+    }
+    if (-not $secretForRun) {
+      Write-Warn 'No client secret provided -- benchmark run skipped.'
     } else {
-      Write-Warn "Script not found: $benchmarkPath"
-      Write-Info 'Make sure both scripts are in the same directory.'
+      $benchmarkPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'CIS_M365_Benchmark_Full.ps1'
+      if (Test-Path $benchmarkPath) {
+        $benchmarkArgs = @{
+          TenantId           = $TenantId
+          AppId              = $AppId
+          AppSecret          = $secretForRun
+          TenantDomain       = $domain
+          SharePointAdminUrl = $spoUrl
+        }
+        if (-not $IncludeExchange) { $benchmarkArgs['GraphOnlyMode'] = $true }
+        & $benchmarkPath @benchmarkArgs
+      } else {
+        Write-Warn "Script not found: $benchmarkPath"
+        Write-Info 'Make sure both scripts are in the same directory.'
+      }
     }
   }
 }

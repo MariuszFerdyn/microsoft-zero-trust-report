@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     CIS Microsoft 365 Foundations Benchmark v6.0.1 - All 129 Automated Checks + 11 Manual Checks

@@ -24,10 +24,23 @@ Key points, in short:
    check titles.
 6. **Never commit result CSVs** (`CIS_*_Results_*.csv`). They are
    tenant-specific and excluded via `.gitignore`.
-7. **Permissions scripts must stay idempotent** -- safe to re-run without
-   duplicating app registrations, secrets, or role assignments.
+7. **Permissions scripts must stay idempotent (app / SPN / roles are
+   create-or-reuse), but always mint a fresh client secret on every run
+   so the printed benchmark command is ready to copy-paste.** Provide
+   `-NoSecret` as the explicit opt-out; keep `-CreateSecret` as a
+   backward-compat no-op. Never persist the secret to
+   `CIS_*_Permissions_Output.json`. At the end of a successful run,
+   print the full `CIS_*_Benchmark_Full.ps1` command and offer a
+   `Run benchmark now? [Y/N]` prompt (honouring `-NoPause`). When
+   `-NoSecret` was passed, read an existing secret interactively via
+   `Read-Host -AsSecureString` instead of passing a placeholder.
 8. **Parse-check all four scripts** after any edit (see validation block in
-   `copilot-instructions.md`).
+   `copilot-instructions.md`). As part of that check, **every `.ps1` must
+   start with a UTF-8 BOM** (`EF BB BF`) — PowerShell 5.1 misparses
+   BOM-less files that contain non-ASCII bytes. Also run `git status`
+   and make sure no `CIS_*_Results_*.csv` or
+   `CIS_*_Permissions_Output.json` is staged; those are tenant-specific
+   artifacts and must not be committed.
 9. **Commit trailer required:**
    `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
    on every agent commit.
