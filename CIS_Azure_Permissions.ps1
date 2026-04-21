@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     CIS Microsoft Azure Foundations Benchmark v5.0.0 - Permissions Setup
 

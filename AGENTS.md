@@ -27,7 +27,12 @@ Key points, in short:
 7. **Permissions scripts must stay idempotent** -- safe to re-run without
    duplicating app registrations, secrets, or role assignments.
 8. **Parse-check all four scripts** after any edit (see validation block in
-   `copilot-instructions.md`).
+   `copilot-instructions.md`). As part of that check, **every `.ps1` must
+   start with a UTF-8 BOM** (`EF BB BF`) — PowerShell 5.1 misparses
+   BOM-less files that contain non-ASCII bytes. Also run `git status`
+   and make sure no `CIS_*_Results_*.csv` or
+   `CIS_*_Permissions_Output.json` is staged; those are tenant-specific
+   artifacts and must not be committed.
 9. **Commit trailer required:**
    `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
    on every agent commit.
