@@ -1,4 +1,16 @@
-instructions: Automatic tests CIS M365 Benchmark, written in PowerShell, to harden your M365 enviorment.
+instructions: |
+  Automatic tests for CIS Azure and CIS Microsoft 365 Benchmarks, written in PowerShell,
+  to harden your Azure / M365 environment.
+
+  When working on CIS benchmark scripts, ALWAYS include Manual (MANL) steps from the
+  CIS documentation - not just the Automated items. Use category "MANL", function
+  naming "Check-MANL-<section>", and print portal path + audit + remediation + refs.
+
+  After any functional change: update README.md if needed, and verify /
+  update the matching Permissions helper (CIS_M365_Permissions.ps1 or
+  CIS_Azure_Permissions.ps1) to reflect any new permissions required.
+
+  See .github/copilot-instructions.md and AGENTS.md for the full rules.
 automation:
   auto_pr_review: true
   auto_issue_session: true
