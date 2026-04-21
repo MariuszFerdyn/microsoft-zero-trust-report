@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     CIS Microsoft Azure Foundations Benchmark v5.0.0 - 103 Automated + 62 Manual Checks
