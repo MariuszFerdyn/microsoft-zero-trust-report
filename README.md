@@ -274,6 +274,45 @@ Status meanings:
  Remediation: Exchange Admin > Settings > Bookings > restrict to specific users
 ```
 
+## Troubleshooting
+
+### `Method not found: '!0 Microsoft.Identity.Client.BaseAbstractApplicationBuilder`1.WithLogging(...)'`
+
+Symptom (Azure benchmark `Connect-AzAccount -ServicePrincipal` step):
+
+```
+[FAIL] Azure connection failed: ClientSecretCredential authentication failed:
+Method not found: '!0 Microsoft.Identity.Client.BaseAbstractApplicationBuilder`1
+.WithLogging(Microsoft.IdentityModel.Abstractions.IIdentityLogger, Boolean)'.
+```
+
+This is **not** a tenant or service-principal issue. It means the Az modules
+currently installed ship an MSAL (`Microsoft.Identity.Client.dll`) that expects
+a newer `Microsoft.IdentityModel.Abstractions.dll` than the one already loaded
+in the PowerShell session -- typically because an older `Az.Accounts` version
+is present, or `Microsoft.Graph.*` was imported first with a mismatched
+abstractions DLL.
+
+Fix (run in a **fresh** PowerShell window -- do not `Import-Module` anything
+first):
+
+```powershell
+Update-Module Az.Accounts, Az.Resources, Az.Network, Az.Security, `
+              Az.Storage, Az.KeyVault, Az.Monitor, Az.Compute, `
+              Az.OperationalInsights, Az.PolicyInsights -Force
+```
+
+If that does not help, clear out old `Az.Accounts` copies and reinstall:
+
+```powershell
+Uninstall-Module Az.Accounts -AllVersions -Force -ErrorAction SilentlyContinue
+Install-Module Az.Accounts -Force -AllowClobber -Scope CurrentUser
+```
+
+Then open a **new** PowerShell window and re-run `.\CIS_Azure_Benchmark_Full.ps1`.
+The script loads `Az.*` before `Microsoft.Graph.*` on purpose; do not pre-import
+`Microsoft.Graph` in the same session.
+
 ## Contributing / Agent instructions
 
 Rules for human contributors and AI agents (Copilot, Copilot Desktop, etc.):

@@ -135,7 +135,33 @@ function Connect-AllServices {
             Write-Host "  [OK] Azure connected (Interactive)" -ForegroundColor Green
         }
     } catch {
-        Write-Host "  [FAIL] Azure connection failed: $_" -ForegroundColor Red
+        $azErr = "$_"
+        Write-Host "  [FAIL] Azure connection failed: $azErr" -ForegroundColor Red
+        if ($azErr -match 'Method not found' -or
+            $azErr -match 'Microsoft\.Identity\.Client' -or
+            $azErr -match 'Microsoft\.IdentityModel\.Abstractions' -or
+            $azErr -match 'WithLogging') {
+            Write-Host "" -ForegroundColor Yellow
+            Write-Host "  This is an Az module assembly-version mismatch, not a tenant issue." -ForegroundColor Yellow
+            Write-Host "  The 'Method not found' / 'WithLogging' error means Az.Accounts is" -ForegroundColor Yellow
+            Write-Host "  loading an MSAL that expects a newer Microsoft.IdentityModel.Abstractions" -ForegroundColor Yellow
+            Write-Host "  than the one already loaded in this session." -ForegroundColor Yellow
+            Write-Host "" -ForegroundColor Yellow
+            Write-Host "  To fix, close this PowerShell window and in a FRESH PowerShell run:" -ForegroundColor Cyan
+            Write-Host "" -ForegroundColor Cyan
+            Write-Host "    Update-Module Az.Accounts, Az.Resources, Az.Network, Az.Security, ``" -ForegroundColor White
+            Write-Host "                  Az.Storage, Az.KeyVault, Az.Monitor, Az.Compute, ``" -ForegroundColor White
+            Write-Host "                  Az.OperationalInsights, Az.PolicyInsights -Force" -ForegroundColor White
+            Write-Host "" -ForegroundColor Cyan
+            Write-Host "  If that does not help, uninstall old Az.Accounts versions and reinstall:" -ForegroundColor Cyan
+            Write-Host "" -ForegroundColor Cyan
+            Write-Host "    Uninstall-Module Az.Accounts -AllVersions -Force -ErrorAction SilentlyContinue" -ForegroundColor White
+            Write-Host "    Install-Module Az.Accounts -Force -AllowClobber -Scope CurrentUser" -ForegroundColor White
+            Write-Host "" -ForegroundColor Cyan
+            Write-Host "  Then open a new PowerShell window and re-run this script." -ForegroundColor Cyan
+            Write-Host "  Do not Import-Module Microsoft.Graph before running -- let this script" -ForegroundColor Cyan
+            Write-Host "  control the load order (Az first, Graph second)." -ForegroundColor Cyan
+        }
         exit 1
     }
 
