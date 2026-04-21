@@ -17,3 +17,20 @@ Key points, in short:
    Graph scope / directory role / API permission to the helper's grant list
    and its verification table. If no new permission is needed, say so
    explicitly in the commit message.
+4. **CSV schema is a contract.** Columns are `Section, Title, Status, Detail`;
+   `Status` is one of `PASS|FAIL|WARN|SKIP|MANL`. Don't change without a
+   README update.
+5. **Preserve exact CIS section IDs and level tags** (`(L1)` / `(L2)`) in
+   check titles.
+6. **Never commit result CSVs** (`CIS_*_Results_*.csv`). They are
+   tenant-specific and excluded via `.gitignore`.
+7. **Permissions scripts must stay idempotent** -- safe to re-run without
+   duplicating app registrations, secrets, or role assignments.
+8. **Parse-check all four scripts** after any edit (see validation block in
+   `copilot-instructions.md`).
+9. **Commit trailer required:**
+   `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
+   on every agent commit.
+
+For new CIS benchmark versions, follow
+[`.github/skills/cis-benchmark-update.md`](.github/skills/cis-benchmark-update.md).
