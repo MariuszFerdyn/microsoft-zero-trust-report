@@ -112,7 +112,7 @@ Results are saved to a timestamped CSV file: `CIS_Azure_Results_<date>.csv`
 
 ### Prerequisites
 
-- **Azure CLI (`az`)** — required by `CIS_Azure_Permissions.ps1` to create the App Registration,
+- **Azure CLI (`az`)** — required by `CIS_M365_Benchmark_Full.ps1` to create the App Registration,
   Service Principal, RBAC role assignments, and Graph permission grants.
   Install from <https://learn.microsoft.com/cli/azure/install-azure-cli> (or `winget install Microsoft.AzureCLI`),
   then sign in with `az login --tenant <tenant-guid>`.
