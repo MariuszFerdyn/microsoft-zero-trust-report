@@ -6,7 +6,7 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 
 | Benchmark | Version | Automated Checks | Manual Checks | Script | Permissions Helper |
 |-----------|---------|------------------:|--------------:|--------|--------------------|
-| CIS Microsoft Azure Foundations | v5.0.0 | 103 | 0 | `CIS_Azure_Benchmark_Full.ps1` | `CIS_Azure_Permissions.ps1` |
+| CIS Microsoft Azure Foundations | v5.0.0 | 103 | 62 | `CIS_Azure_Benchmark_Full.ps1` | `CIS_Azure_Permissions.ps1` |
 | CIS Microsoft 365 Foundations | v6.0.1 | 129 | 11 | `CIS_M365_Benchmark_Full.ps1` | `CIS_M365_Permissions.ps1` |
 
 > **Manual (MANL) checks** cover CIS items that cannot be fully verified via
@@ -23,12 +23,14 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 
 | Section | Area | Checks |
 |---------|------|-------:|
-| 2 | Databricks | 7 |
-| 5 | Identity / Entra ID | 9 |
-| 6 | Logging & Monitoring | 22 |
-| 7 | Networking | 17 |
-| 8 | Security (Defender, Key Vault, Bastion, DDoS) | 30 |
-| 9 | Storage | 18 |
+| 2 | Databricks | 7 automated + 5 manual |
+| 3 | Virtual Machines | 1 manual |
+| 5 | Identity / Entra ID | 9 automated + 34 manual |
+| 6 | Logging & Monitoring | 22 automated + 9 manual |
+| 7 | Networking | 17 automated + 3 manual |
+| 8 | Security (Defender, Key Vault, Bastion, DDoS) | 30 automated + 8 manual |
+| 9 | Storage | 18 automated + 2 manual |
+| MANL | Manual checks (CIS items marked _Manual_) | 62 total, grouped by origin section |
 
 > **Multi-resource coverage:** checks that target resource types which can exist more than once
 > (Databricks workspaces, NSGs, VNets, Bastion hosts, VPN Gateways, App Services, Public IPs, Storage
