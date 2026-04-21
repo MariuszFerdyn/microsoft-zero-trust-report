@@ -64,6 +64,52 @@ Permissions helper** (`CIS_M365_Permissions.ps1` or `CIS_Azure_Permissions.ps1`)
 - Keep the README prerequisites / permissions section in sync with any change
   to the helper.
 
+### 4. CSV schema is a stable contract
+
+The results CSV written by each benchmark script has a fixed schema:
+
+- **Columns (in order):** `Section, Title, Status, Detail`.
+- **Allowed `Status` values:** `PASS`, `FAIL`, `WARN`, `SKIP`, `MANL`.
+
+Treat this as a public interface. Do not rename, reorder, add, or remove
+columns; do not introduce new `Status` values without also updating the
+README status table, the color map in `Show-Summary`, and any downstream
+consumers. If a schema change is truly required, call it out explicitly in
+the PR description.
+
+### 5. Section IDs and level tags must match the CIS source exactly
+
+- The `Section` value (e.g. `1.3.8`, `6.1.1.10`) must match the CIS
+  benchmark PDF verbatim. Do not renumber, invent, or pad section IDs.
+- Preserve the CIS **level** annotation in the title string: `(L1)` or
+  `(L2)`. The canonical form used by `Invoke-Check` is
+  `"<section> (L1|L2)"` for the first argument and the full CIS title
+  (including a trailing `(Automated)` or `(Manual)`) for the second.
+- The `Add-Result` section argument must equal the first part of the
+  `Invoke-Check` section string (no level tag). Keep the two aligned.
+
+### 6. Never commit generated result CSVs
+
+- Result CSVs (`CIS_*_Results_*.csv`) are tenant-specific audit output and
+  must never be committed.
+- The repo's `.gitignore` already excludes `CIS_*_Results_*.csv`. Do not
+  weaken or remove this rule. If you accidentally stage one, un-stage it
+  before committing.
+
+### 7. Permissions scripts must be idempotent
+
+`CIS_M365_Permissions.ps1` and `CIS_Azure_Permissions.ps1` are expected to
+be safely re-runnable by operators. When modifying them:
+
+- Use "create or reuse" patterns (look up the App Registration / Service
+  Principal / role assignment by name or id first, create only if missing).
+- Do not generate or overwrite a client secret on every run — only when
+  explicitly requested by a parameter.
+- Do not fail the whole script because a role assignment already exists;
+  treat that as success. Prefer `az ... --only-show-errors` and explicit
+  `try { } catch { }` around idempotent operations.
+- Keep the verification table at the bottom in sync with the grants above.
+
 ## Coding conventions
 
 - PowerShell 5.1 compatible; use `#Requires -Version 5.1`.
@@ -75,17 +121,50 @@ Permissions helper** (`CIS_M365_Permissions.ps1` or `CIS_Azure_Permissions.ps1`)
   block of `CIS_M365_Benchmark_Full.ps1` are only examples — do not replace
   them with live credentials.
 
-## Validation
+## Commit message requirements
 
-Before finishing a change, at minimum run a PowerShell AST parse to catch
-syntax errors:
+Every commit created by an AI agent in this repository must include the
+following trailer at the end of the commit message:
 
-```powershell
-$tokens = $null; $errors = $null
-[System.Management.Automation.Language.Parser]::ParseFile(
-    ".\CIS_M365_Benchmark_Full.ps1", [ref]$tokens, [ref]$errors) | Out-Null
-$errors
+```
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ```
 
-The check must emit no errors. When possible, run the benchmark end-to-end
-against a lab tenant and confirm the new result appears in the CSV.
+This applies to both single-agent commits and multi-author / pair-programmed
+commits. Do not rewrite existing history to add or remove this trailer.
+
+## Validation
+
+Before finishing a change, run a PowerShell AST parse over **all four**
+scripts (not just the one you edited — shared helper patterns drift
+easily):
+
+```powershell
+$scripts = @(
+    'CIS_Azure_Benchmark_Full.ps1',
+    'CIS_Azure_Permissions.ps1',
+    'CIS_M365_Benchmark_Full.ps1',
+    'CIS_M365_Permissions.ps1'
+)
+foreach ($f in $scripts) {
+    $tokens = $null; $errors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile(
+        ".\$f", [ref]$tokens, [ref]$errors) | Out-Null
+    if ($errors) { "$f : $($errors.Count) errors"; $errors[0] }
+    else         { "$f : OK" }
+}
+```
+
+The check must emit `OK` for every script. When possible, run the benchmark
+end-to-end against a lab tenant and confirm the new result appears in the
+CSV.
+
+## Updating to a new CIS benchmark version
+
+When CIS publishes a new version of the Azure Foundations or M365
+Foundations benchmark, follow the playbook in
+[`.github/skills/cis-benchmark-update.md`](skills/cis-benchmark-update.md).
+In short: extract the PDF to text with `pdftotext -layout` (Xpdf), diff
+the section list against the current scripts, add / remove Automated and
+MANL checks, update README counts, re-verify the Permissions helper, and
+parse-check all four scripts.
