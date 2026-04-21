@@ -62,12 +62,13 @@ param(
   [string]$AppId,
 
   [Parameter(Mandatory = $false)]
+  # Retained for backward compatibility. Secret creation is on by default,
+  # so this switch is now a no-op and will be removed in a future release.
   [switch]$CreateSecret,
 
   [Parameter(Mandatory = $false)]
-  # Retained for backward compatibility. Secret creation is now opt-in via
-  # -CreateSecret, so this switch has no effect and will be removed in a
-  # future release.
+  # Skip client-secret creation on this run (use when rotating secrets
+  # manually or when only updating role assignments).
   [switch]$NoSecret,
 
   [Parameter(Mandatory = $false)]
@@ -449,10 +450,11 @@ if ($spResult.Created) {
 Write-Ok "ObjectId (SP): $spObjId"
 Wait-Step
 
-Write-Section "Create client secret (optional)"
-# Secret creation is opt-in via -CreateSecret so re-runs stay idempotent.
+Write-Section "Create client secret"
+# Always mint a fresh client secret so the printed benchmark command is
+# ready to run. Pass -NoSecret to skip (e.g. when rotating manually).
 $secret = $null
-if ($CreateSecret) {
+if (-not $NoSecret) {
   $secret = Invoke-Az -AzArgs @(
     "ad","app","credential","reset",
     "--id", $AppId,
@@ -465,7 +467,7 @@ if ($CreateSecret) {
   Write-Warn "This is the ONLY time you can retrieve the secret value."
   Write-Host "  Secret: $secret" -ForegroundColor Magenta
 } else {
-  Write-Info "Skipped creating secret"
+  Write-Info "Skipped creating secret (-NoSecret was passed)"
 }
 Wait-Step
 
@@ -1081,7 +1083,7 @@ if (-not $NoPause) {
     $secretForRun = $secret
     if (-not $secretForRun) {
       Write-Host ''
-      Write-Host '  No client secret was created this run (use -CreateSecret to mint one).' -ForegroundColor DarkYellow
+      Write-Host '  No client secret was created this run (-NoSecret was passed).' -ForegroundColor DarkYellow
       Write-Host "  Paste an existing client secret for app $AppId to run the benchmark now," -ForegroundColor DarkYellow
       Write-Host '  or press Enter to skip.' -ForegroundColor DarkYellow
       $secureSecret = Read-Host '  AppSecret' -AsSecureString

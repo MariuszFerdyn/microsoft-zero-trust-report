@@ -96,18 +96,30 @@ the PR description.
   weaken or remove this rule. If you accidentally stage one, un-stage it
   before committing.
 
-### 7. Permissions scripts must be idempotent
+### 7. Permissions scripts must be idempotent, but always mint a fresh secret
 
 `CIS_M365_Permissions.ps1` and `CIS_Azure_Permissions.ps1` are expected to
 be safely re-runnable by operators. When modifying them:
 
-- Use "create or reuse" patterns (look up the App Registration / Service
-  Principal / role assignment by name or id first, create only if missing).
-- Do not generate or overwrite a client secret on every run — only when
-  explicitly requested by a parameter.
+- Use "create or reuse" patterns for the App Registration, Service
+  Principal, API permissions, and role assignments: look them up by
+  name or id first, create only if missing. Re-running the script must
+  not produce duplicate apps, duplicate SPNs, or duplicate role
+  assignments.
+- **Always mint a fresh client secret on every run by default.** The
+  printed benchmark command at the end must be ready to copy-paste
+  without asking the operator to hunt down a previous secret. Provide
+  a `-NoSecret` switch as the explicit opt-out for operators who
+  rotate secrets manually or only want to update role assignments;
+  `-NoSecret` must not skip any of the other setup steps. Keep
+  `-CreateSecret` accepted as a no-op for backward compatibility until
+  it can be removed.
 - Do not fail the whole script because a role assignment already exists;
   treat that as success. Prefer `az ... --only-show-errors` and explicit
   `try { } catch { }` around idempotent operations.
+- Never write the secret to `CIS_*_Permissions_Output.json` or any
+  other file that might be committed. Print it to the console once,
+  inside the "SAVE THIS SECRET NOW" banner.
 - Keep the verification table at the bottom in sync with the grants above.
 
 ### 8. Permissions scripts must offer to run the benchmark at the end
@@ -116,15 +128,15 @@ At the end of every successful run, both `CIS_M365_Permissions.ps1` and
 `CIS_Azure_Permissions.ps1` must:
 
 - print the exact `CIS_*_Benchmark_Full.ps1` invocation (tenant, app,
-  subscription, secret placeholder, any optional flags) so the operator
-  can copy-paste it later;
+  subscription, the freshly minted secret, any optional flags) so the
+  operator can copy-paste it later;
 - then, unless `-NoPause` was passed, prompt **`Run benchmark now? [Y/N]`**
   and, on `Y`, invoke the matching benchmark script in-process with the
   parameters that were just configured.
 
-Handle the no-secret path explicitly. When the operator did not pass
-`-CreateSecret`, there is no secret in memory. In that case the prompt
-must still be offered; if the operator chooses `Y`, ask for the existing
+Handle the `-NoSecret` edge case explicitly. When the operator passed
+`-NoSecret` there is no secret in memory. In that case the prompt must
+still be offered; if the operator chooses `Y`, ask for the existing
 secret via `Read-Host -AsSecureString` (never echo it, never persist it
 to `CIS_*_Permissions_Output.json`), convert it with
 `Marshal.SecureStringToBSTR` / `PtrToStringAuto`, and pass the plain
@@ -134,7 +146,7 @@ operator presses Enter without supplying a secret, print a single
 exit cleanly.
 
 Do not pass placeholder text (for example `YOUR-CLIENT-SECRET` or
-`<NOT_CREATED - re-run with -CreateSecret>`) to the benchmark script --
+`<NOT_CREATED - re-run without -NoSecret>`) to the benchmark script --
 guard against it.
 
 ## Coding conventions

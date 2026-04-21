@@ -64,12 +64,13 @@ param(
     [string]$AppId,
 
     [Parameter(Mandatory = $false)]
+    # Retained for backward compatibility. Secret creation is on by default,
+    # so this switch is now a no-op and will be removed in a future release.
     [switch]$CreateSecret,
 
     [Parameter(Mandatory = $false)]
-    # Retained for backward compatibility. Secret creation is now opt-in via
-    # -CreateSecret, so this switch has no effect and will be removed in a
-    # future release.
+    # Skip client-secret creation on this run (use when rotating secrets
+    # manually or when only updating role assignments).
     [switch]$NoSecret,
 
     [Parameter(Mandatory = $false)]
@@ -273,10 +274,11 @@ if ($SkipGraphPermissions) {
     }
     $spObjectId = $sp.id
 
-    # Create client secret (opt-in; -CreateSecret). Re-running without the
-    # switch does not mint a new secret, so the script stays idempotent.
+    # Always mint a fresh client secret so the printed benchmark command
+    # is ready to run. Operators who want to skip rotation can pass
+    # -NoSecret (e.g. when only updating role assignments).
     $clientSecret = $null
-    if ($CreateSecret) {
+    if (-not $NoSecret) {
         Write-Detail "Creating client secret (valid for $SecretYears year(s))..."
         $endDate = (Get-Date).AddYears($SecretYears).ToString("yyyy-MM-ddTHH:mm:ssZ")
         $secretResult = Invoke-AzJson -Arguments @(
@@ -466,7 +468,7 @@ Write-Host "  To run the CIS Azure Foundations Benchmark:" -ForegroundColor Whit
 Write-Host ""
 
 if ($AppId -and $AppId -ne "SKIPPED") {
-    $secretDisplay = if ($clientSecret) { $clientSecret } else { "<NOT_CREATED - re-run with -CreateSecret>" }
+    $secretDisplay = if ($clientSecret) { $clientSecret } else { "<NOT_CREATED - re-run without -NoSecret>" }
     Write-Host "    .\CIS_Azure_Benchmark_Full.ps1 ``" -ForegroundColor Yellow
     Write-Host "        -TenantId `"$TenantId`" ``" -ForegroundColor Yellow
     Write-Host "        -SubscriptionId `"$SubscriptionId`" ``" -ForegroundColor Yellow
@@ -488,7 +490,7 @@ if (-not $NoPause -and $AppId -and $AppId -ne "SKIPPED") {
         $secretForRun = $clientSecret
         if (-not $secretForRun) {
             Write-Host ""
-            Write-Host "  No client secret was created this run (use -CreateSecret to mint one)." -ForegroundColor DarkYellow
+            Write-Host "  No client secret was created this run (-NoSecret was passed)." -ForegroundColor DarkYellow
             Write-Host "  Paste an existing client secret for app $AppId to run the benchmark now," -ForegroundColor DarkYellow
             Write-Host "  or press Enter to skip." -ForegroundColor DarkYellow
             $secureSecret = Read-Host '  ClientSecret' -AsSecureString
