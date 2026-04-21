@@ -18,6 +18,16 @@
         * Intune Administrator
     - Verify all granted permissions and report missing ones (dynamic check)
 
+.NOTES
+  Coverage: the Graph application permissions granted by this helper
+  (Directory.Read.All, Organization.Read.All, User.Read.All,
+  RoleManagement.Read.All, Policy.Read.All, Reports.Read.All, etc.) also
+  cover the Manual (MANL) checks added to CIS_M365_Benchmark_Full.ps1
+  (sections 1.1.2, 5.1.8.1, 8.4.1, ...). No additional scopes are required
+  for MANL coverage. When adding a new MANL or Automated check, re-verify
+  this list and extend both the grant block and the verification table
+  below if a new Graph scope, directory role, or API permission is needed.
+
   Notes:
     - Directory roles assignment requires you to run this while signed in as an account
       that can assign directory roles (Global Admin / Privileged Role Admin).

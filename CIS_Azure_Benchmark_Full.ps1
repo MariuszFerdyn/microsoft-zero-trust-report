@@ -1,17 +1,23 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    CIS Microsoft Azure Foundations Benchmark v5.0.0 - 103 Checks (Automated + Manual)
+    CIS Microsoft Azure Foundations Benchmark v5.0.0 - 103 Automated + 62 Manual Checks
 
 .DESCRIPTION
-    Implements all 93 automated checks from the CIS Microsoft Azure Foundations
-    Benchmark v5.0.0 covering:
-      Section 2  - Databricks (6 checks)
-      Section 5  - Identity / Entra ID (9 checks)
-      Section 6  - Logging & Monitoring (16 checks)
-      Section 7  - Networking (14 checks)
-      Section 8  - Security (30 checks)
-      Section 9  - Storage (18 checks)
+    Implements 103 automated checks plus 62 Manual (MANL) checks from the
+    CIS Microsoft Azure Foundations Benchmark v5.0.0, covering:
+      Section 2  - Databricks (6 automated + 5 manual)
+      Section 3  - Virtual Machines (1 manual)
+      Section 5  - Identity / Entra ID (9 automated + 34 manual)
+      Section 6  - Logging & Monitoring (16 automated + 9 manual)
+      Section 7  - Networking (14 automated + 3 manual)
+      Section 8  - Security (30 automated + 8 manual)
+      Section 9  - Storage (18 automated + 2 manual)
+
+    Manual (MANL) items are items the CIS benchmark marks (Manual) because
+    they cannot be fully verified via API. The script still prints portal
+    path, audit steps, and remediation for each, and records a MANL result
+    in the CSV.
 
     Supports service-principal (non-interactive) and interactive authentication.
     Outputs results to console and CSV.
@@ -40,6 +46,7 @@ param(
 $Script:PassCount = 0
 $Script:FailCount = 0
 $Script:WarnCount = 0
+$Script:ManlCount = 0
 $Script:Results   = [System.Collections.Generic.List[object]]::new()
 
 # ===============================================================================
@@ -64,6 +71,7 @@ function Write-CheckHeader {
 function Write-Pass { param([string]$M); Write-Host "  [PASS] $M" -ForegroundColor Green;   $Script:PassCount++ }
 function Write-Fail { param([string]$M); Write-Host "  [FAIL] $M" -ForegroundColor Red;     $Script:FailCount++ }
 function Write-Warn { param([string]$M); Write-Host "  [WARN] $M" -ForegroundColor Magenta; $Script:WarnCount++ }
+function Write-Manl { param([string]$M); Write-Host "  [MANL] $M" -ForegroundColor Cyan;    $Script:ManlCount++ }
 function Write-Info { param([string]$M); Write-Host "    $M"       -ForegroundColor Gray }
 function Write-Skip { param([string]$M); Write-Host "  [SKIP] $M" -ForegroundColor DarkGray }
 
@@ -2939,10 +2947,1072 @@ function Check-9_3_11 {
     }
 }
 # ===============================================================================
+#  SECTION MANL - MANUAL CHECKS (62 items from CIS Azure Foundations v5.0.0)
+# ===============================================================================
+# Items flagged (Manual) in the CIS benchmark cannot be fully verified via API.
+# Each function prints: portal location, audit steps, remediation, and records
+# a MANL result in the CSV so operators can triage them after the run.
+# ===============================================================================
+
+function Write-ManualAudit {
+    param(
+        [string]  $Portal,
+        [string[]]$AuditSteps,
+        [string[]]$Remediation
+    )
+    if ($Portal)      { Write-Info "Portal: $Portal" }
+    if ($AuditSteps)  { Write-Info "Audit:"; foreach ($s in $AuditSteps)  { Write-Info "  - $s" } }
+    if ($Remediation) { Write-Info "Remediation:"; foreach ($s in $Remediation) { Write-Info "  - $s" } }
+}
+
+function Check-MANL-2_1_3 {
+    Invoke-Check "2.1.3 (L2)" "Ensure that traffic is encrypted between cluster worker nodes (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Azure portal > Azure Databricks > select workspace > Launch Workspace",
+                "In Databricks: Compute > Cluster > Advanced options > Spark > Spark config",
+                "Verify 'spark.databricks.encryption.enabled true' is set on every cluster"
+            ) `
+            -Remediation @(
+                "On each cluster: Advanced options > Spark > Spark config, add 'spark.databricks.encryption.enabled true'",
+                "Or enforce via cluster policy that mandates the setting"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "2.1.3" "Ensure that traffic is encrypted between cluster worker nodes" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-2_1_4 {
+    Invoke-Check "2.1.4 (L1)" "Ensure that users and groups are synced from Microsoft Entra ID to Azure Databricks (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://accounts.azuredatabricks.net" `
+            -AuditSteps @(
+                "Log in to the Databricks account console",
+                "User Management > verify SCIM provisioning from Microsoft Entra ID is enabled",
+                "Confirm the expected Entra users/groups appear"
+            ) `
+            -Remediation @(
+                "Entra ID: Enterprise applications > 'Azure Databricks SCIM Provisioning Connector' (or equivalent)",
+                "Configure provisioning with Tenant URL + token from the account console and enable automatic provisioning"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "2.1.4" "Ensure that users and groups are synced from Microsoft Entra ID to Azure Data..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-2_1_5 {
+    Invoke-Check "2.1.5 (L1)" "Ensure that Unity Catalog is configured for Azure Databricks (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://accounts.azuredatabricks.net" `
+            -AuditSteps @(
+                "Databricks account console > Data > Metastores",
+                "Verify a Unity Catalog metastore exists for each region",
+                "In each workspace > Catalog, confirm workspace is attached to a UC metastore (not legacy Hive)"
+            ) `
+            -Remediation @(
+                "Create a metastore: Data > Create metastore (storage account + managed identity access connector)",
+                "Assign the metastore to each workspace and migrate data from the legacy Hive metastore"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "2.1.5" "Ensure that Unity Catalog is configured for Azure Databricks" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-2_1_6 {
+    Invoke-Check "2.1.6 (L1)" "Ensure that usage is restricted and expiry is enforced for Databricks personal access tokens (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Databricks workspace > Settings > Admin Settings > Workspace Settings",
+                "Verify 'Personal Access Tokens' is OFF, or restricted to specific users/groups with a short maximum lifetime",
+                "API: GET /api/2.0/workspace-conf?keys=enableTokensConfig,maxTokenLifetimeDays"
+            ) `
+            -Remediation @(
+                "Disable PAT if unused: Admin Settings > Workspace Settings > Personal Access Tokens = Off",
+                "If required: restrict via Token Management permissions and set maximum token lifetime (e.g. 90 days)"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "2.1.6" "Ensure that usage is restricted and expiry is enforced for Databricks persona..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-2_1_8 {
+    Invoke-Check "2.1.8 (L2)" "Ensure critical data in Azure Databricks is encrypted with customer-managed keys (CMK) (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Azure portal > Databricks workspace > Encryption",
+                "Verify 'Managed services' and 'Managed disks (DBFS root + compute disks)' use customer-managed keys from your Key Vault"
+            ) `
+            -Remediation @(
+                "Create/select a Key Vault key + access policy for the Databricks RP",
+                "On a Premium workspace, configure Managed services CMK and Managed disks CMK (may require workspace redeploy)"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "2.1.8" "Ensure critical data in Azure Databricks is encrypted with customer-managed k..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-3_1_1 {
+    Invoke-Check "3.1.1 (L2)" "Ensure only MFA enabled identities can access privileged Virtual Machine (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Conditional Access > Policies",
+                "Verify a policy that requires MFA when accessing 'Azure Virtual Machine Login' / 'Windows Azure Service Management API'",
+                "Check VM > Access control (IAM): identities with Virtual Machine Administrator Login / User Login are covered by the policy"
+            ) `
+            -Remediation @(
+                "Create Conditional Access policy: Users=VM admins, Cloud apps=Azure VM Login / Windows Azure Service Management, Grant=Require MFA",
+                "Enable just-in-time VM access via Defender for Cloud for privileged VMs"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "3.1.1" "Ensure only MFA enabled identities can access privileged Virtual Machine" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_1_3 {
+    Invoke-Check "5.1.3 (L1)" "Ensure that 'Allow users to remember multifactor authentication on devices they trust' is disabled (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Users > Per-user MFA > service settings",
+                "'Remember multi-factor authentication on trusted device' is UNCHECKED"
+            ) `
+            -Remediation @(
+                "Uncheck 'Remember multi-factor authentication on trusted device' and click Save",
+                "Prefer Conditional Access + sign-in frequency over legacy per-user MFA settings"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.1.3" "Ensure that 'Allow users to remember multifactor authentication on devices th..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_2_1 {
+    Invoke-Check "5.2.1 (L2)" "Ensure that 'trusted locations' are defined (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Conditional Access > Named locations",
+                "Verify at least one 'trusted' named location covers your corporate IPs / country list"
+            ) `
+            -Remediation @(
+                "Named locations > New location: add corporate egress IPs and mark 'Mark as trusted location'",
+                "Reference the trusted locations from Conditional Access policies"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.2.1" "Ensure that 'trusted locations' are defined" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_2_2 {
+    Invoke-Check "5.2.2 (L2)" "Ensure that an exclusionary geographic Conditional Access policy is considered (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Conditional Access > Policies",
+                "Verify a policy that Blocks access when location = 'Any location' EXCLUDING your allowed countries named location"
+            ) `
+            -Remediation @(
+                "Create a named location listing only countries you do business in",
+                "New CA policy: Users=All, Cloud apps=All, Conditions=Locations (Include Any, Exclude your allow-list), Grant=Block"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.2.2" "Ensure that an exclusionary geographic Conditional Access policy is considered" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_2_3 {
+    Invoke-Check "5.2.3 (L2)" "Ensure that an exclusionary device code flow policy is considered (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Conditional Access > Policies",
+                "Verify a policy that Blocks 'device code flow' except for a specific break-glass group / device category"
+            ) `
+            -Remediation @(
+                "New CA policy: Conditions > Authentication flows > Device code flow = Include",
+                "Grant = Block; exclude only the identities that genuinely require device code flow"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.2.3" "Ensure that an exclusionary device code flow policy is considered" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_2_4 {
+    Invoke-Check "5.2.4 (L2)" "Ensure that a multifactor authentication policy exists for all users (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Conditional Access > Policies",
+                "Verify a policy: Users=All users (exclude break-glass), Cloud apps=All, Grant=Require MFA, State=On"
+            ) `
+            -Remediation @(
+                "Create CA policy 'Require MFA - All users': Users=All (exclude emergency-access accounts), Apps=All, Grant=Require MFA",
+                "Run in report-only mode first, then enable"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.2.4" "Ensure that a multifactor authentication policy exists for all users" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_2_5 {
+    Invoke-Check "5.2.5 (L2)" "Ensure that multifactor authentication is required for risky sign-ins (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Conditional Access > Policies",
+                "Verify a policy with Conditions > Sign-in risk = High (and/or Medium), Grant = Require MFA"
+            ) `
+            -Remediation @(
+                "Requires Microsoft Entra ID P2",
+                "Create CA policy: Conditions > Sign-in risk = High, Grant = Require MFA (+ block on high)"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.2.5" "Ensure that multifactor authentication is required for risky sign-ins" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_2_6 {
+    Invoke-Check "5.2.6 (L2)" "Ensure that multifactor authentication is required for Windows Azure Service Management API (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Conditional Access > Policies",
+                "Verify a policy targeting Cloud app 'Microsoft Azure Management' (or 'Windows Azure Service Management API') requiring MFA for all users"
+            ) `
+            -Remediation @(
+                "CA policy: Users=All (exclude break-glass), Cloud apps=Microsoft Azure Management, Grant=Require MFA"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.2.6" "Ensure that multifactor authentication is required for Windows Azure Service ..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_2_7 {
+    Invoke-Check "5.2.7 (L2)" "Ensure that multifactor authentication is required to access Microsoft Admin Portals (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Conditional Access > Policies",
+                "Verify a policy targeting Cloud app 'Microsoft Admin Portals' requiring MFA and compliant device"
+            ) `
+            -Remediation @(
+                "CA policy: Users=All admins, Cloud apps=Microsoft Admin Portals, Grant=Require MFA AND compliant device / Hybrid Azure AD join"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.2.7" "Ensure that multifactor authentication is required to access Microsoft Admin ..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_2_8 {
+    Invoke-Check "5.2.8 (L2)" "Ensure a Token Protection Conditional Access policy is considered (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Conditional Access > Policies",
+                "Verify a policy with Session > 'Require token protection for sign-in sessions' enabled for supported apps"
+            ) `
+            -Remediation @(
+                "Create CA policy: Users=pilot group, Cloud apps=Exchange Online + SharePoint Online, Session=Require token protection",
+                "Expand scope after validation"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.2.8" "Ensure a Token Protection Conditional Access policy is considered" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_3_1 {
+    Invoke-Check "5.3.1 (L1)" "Ensure that Azure admin accounts are not used for daily operations (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Roles & admins: enumerate members of Global Administrator, Privileged Role Administrator, Security Administrator",
+                "Confirm each is a dedicated admin account (not the person's day-to-day mailbox), cloud-only, with PIM eligibility only"
+            ) `
+            -Remediation @(
+                "Create separate cloud-only admin accounts (admin-<user>@domain.onmicrosoft.com)",
+                "Remove privileged roles from regular user accounts; assign eligibly via PIM"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.3.1" "Ensure that Azure admin accounts are not used for daily operations" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_3_2 {
+    Invoke-Check "5.3.2 (L1)" "Ensure that guest users are reviewed on a regular basis (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Users > All users > filter User type = Guest",
+                "Identity Governance > Access reviews: verify a recurring access review targets external/guest users"
+            ) `
+            -Remediation @(
+                "Create an Access Review (Identity Governance > Access reviews) on the 'All guests' group, frequency=Quarterly, reviewers=group owners or managers",
+                "Require reviewer justification and automatically remove non-responders"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.3.2" "Ensure that guest users are reviewed on a regular basis" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_3_4 {
+    Invoke-Check "5.3.4 (L1)" "Ensure that all 'privileged' role assignments are periodically reviewed (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity Governance > Privileged Identity Management > Azure AD roles > Access reviews",
+                "Verify recurring reviews cover every privileged role (Global Admin, Privileged Role Admin, Exchange Admin, etc.)"
+            ) `
+            -Remediation @(
+                "PIM > Azure AD roles > Access reviews > New: select role, reviewers=self or managers, recurrence=Quarterly, length=5 days",
+                "Configure auto-apply of results"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.3.4" "Ensure that all 'privileged' role assignments are periodically reviewed" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_3_5 {
+    Invoke-Check "5.3.5 (L1)" "Ensure disabled user accounts do not have read, write, or owner permissions (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Entra: filter Users where Account enabled = No",
+                "For each, check Azure > Subscription > Access control (IAM) > Role assignments: no assignments referencing disabled principals",
+                "PowerShell: Get-AzRoleAssignment | Where-Object ObjectId matches disabled user list"
+            ) `
+            -Remediation @(
+                "Remove role assignments for disabled users (Subscription/RG > IAM > Remove)",
+                "Add a process: when disabling a user also run Remove-AzRoleAssignment for every scope"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.3.5" "Ensure disabled user accounts do not have read, write, or owner permissions" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_3_6 {
+    Invoke-Check "5.3.6 (L1)" "Ensure 'Tenant Creator' role assignments are periodically reviewed (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Roles & admins > Tenant Creator: list members",
+                "PIM or Access Reviews configured for the Tenant Creator role"
+            ) `
+            -Remediation @(
+                "Remove Tenant Creator from users who do not need to create tenants",
+                "Create an Access Review on the Tenant Creator role with quarterly cadence"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.3.6" "Ensure 'Tenant Creator' role assignments are periodically reviewed" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_3_7 {
+    Invoke-Check "5.3.7 (L1)" "Ensure all non-privileged role assignments are periodically reviewed (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity Governance > Access reviews: verify recurring reviews on Azure resource role assignments (Reader, Contributor, etc.) at subscription / management-group scope"
+            ) `
+            -Remediation @(
+                "Create Access Reviews targeting Azure resource RBAC scopes",
+                "Set reviewers=resource owners, recurrence=Quarterly, auto-apply results"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.3.7" "Ensure all non-privileged role assignments are periodically reviewed" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_5 {
+    Invoke-Check "5.5 (L1)" "Ensure that 'Number of methods required to reset' is set to '2' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Password reset > Authentication methods",
+                "Verify 'Number of methods required to reset' = 2"
+            ) `
+            -Remediation @(
+                "Set 'Number of methods required to reset' to 2 and Save"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.5" "Ensure that 'Number of methods required to reset' is set to '2'" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_6 {
+    Invoke-Check "5.6 (L1)" "Ensure that account 'Lockout threshold' is less than or equal to '10' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Authentication methods > Password protection",
+                "Verify 'Lockout threshold' <= 10"
+            ) `
+            -Remediation @(
+                "Set 'Lockout threshold' to a value <= 10 and Save"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.6" "Ensure that account 'Lockout threshold' is less than or equal to '10'" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_7 {
+    Invoke-Check "5.7 (L1)" "Ensure that account 'Lockout duration in seconds' is greater than or equal to '60' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Authentication methods > Password protection",
+                "Verify 'Lockout duration in seconds' >= 60"
+            ) `
+            -Remediation @(
+                "Set 'Lockout duration in seconds' to >= 60 and Save"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.7" "Ensure that account 'Lockout duration in seconds' is greater than or equal to..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_8 {
+    Invoke-Check "5.8 (L1)" "Ensure that a 'Custom banned password list' is set to 'Enforce' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Authentication methods > Password protection",
+                "Verify 'Enforce custom list' is Yes and the list contains your organisation's weak/brand terms"
+            ) `
+            -Remediation @(
+                "Enable 'Enforce custom list' = Yes, populate the Custom banned password list, Save"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.8" "Ensure that a 'Custom banned password list' is set to 'Enforce'" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_9 {
+    Invoke-Check "5.9 (L1)" "Ensure that 'Number of days before users are asked to re-confirm their authentication information' is not set to '0' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Password reset > Registration",
+                "Verify 'Number of days before users are asked to re-confirm their authentication information' is NOT 0 (e.g., 180)"
+            ) `
+            -Remediation @(
+                "Change value to a non-zero interval (e.g., 180 days) and Save"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.9" "Ensure that 'Number of days before users are asked to re-confirm their authen..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_10 {
+    Invoke-Check "5.10 (L1)" "Ensure that 'Notify users on password resets?' is set to 'Yes' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Password reset > Notifications",
+                "'Notify users on password resets?' = Yes"
+            ) `
+            -Remediation @(
+                "Set 'Notify users on password resets?' = Yes and Save"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.10" "Ensure that 'Notify users on password resets?' is set to 'Yes'" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_11 {
+    Invoke-Check "5.11 (L1)" "Ensure that 'Notify all admins when other admins reset their password?' is set to 'Yes' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Password reset > Notifications",
+                "'Notify all admins when other admins reset their password?' = Yes"
+            ) `
+            -Remediation @(
+                "Set 'Notify all admins when other admins reset their password?' = Yes and Save"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.11" "Ensure that 'Notify all admins when other admins reset their password?' is se..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_12 {
+    Invoke-Check "5.12 (L1)" "Ensure that 'User consent for applications' is set to 'Do not allow user consent' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Applications > Enterprise applications > Consent and permissions > User consent settings",
+                "Verify 'User consent for applications' = 'Do not allow user consent'"
+            ) `
+            -Remediation @(
+                "Select 'Do not allow user consent' and Save",
+                "Configure admin consent workflow so users can request approval"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.12" "Ensure that 'User consent for applications' is set to 'Do not allow user cons..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_13 {
+    Invoke-Check "5.13 (L2)" "Ensure that 'User consent for applications' is set to 'Allow user consent for apps from verified publishers, for selected permissions' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Applications > Enterprise applications > Consent and permissions",
+                "Verify user consent is restricted to verified publishers and a named permission classification (low impact)"
+            ) `
+            -Remediation @(
+                "Select 'Allow user consent for apps from verified publishers, for selected permissions'",
+                "Classify the permissions in 'Permission classifications' that may be consented"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.13" "Ensure that 'User consent for applications' is set to 'Allow user consent for..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_17 {
+    Invoke-Check "5.17 (L1)" "Ensure that 'Restrict access to Microsoft Entra admin center' is set to 'Yes' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Users > User settings",
+                "Verify 'Restrict access to Microsoft Entra admin center' = Yes"
+            ) `
+            -Remediation @(
+                "Toggle 'Restrict access to Microsoft Entra admin center' to Yes and Save"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.17" "Ensure that 'Restrict access to Microsoft Entra admin center' is set to 'Yes'" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_18 {
+    Invoke-Check "5.18 (L2)" "Ensure that 'Restrict user ability to access groups features in My Groups' is set to 'Yes' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Groups > General (or User settings > Groups)",
+                "'Restrict user ability to access groups features in the access panel' = Yes"
+            ) `
+            -Remediation @(
+                "Set the toggle to Yes and Save"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.18" "Ensure that 'Restrict user ability to access groups features in My Groups' is..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_19 {
+    Invoke-Check "5.19 (L2)" "Ensure that 'Users can create security groups in Azure portals, API or PowerShell' is set to 'No' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Groups > General",
+                "'Users can create security groups in Azure portals, API or PowerShell' = No"
+            ) `
+            -Remediation @(
+                "Set the toggle to No and Save"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.19" "Ensure that 'Users can create security groups in Azure portals, API or PowerS..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_20 {
+    Invoke-Check "5.20 (L2)" "Ensure that 'Owners can manage group membership requests in My Groups' is set to 'No' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Groups > General",
+                "'Owners can manage group membership requests in the access panel' = No"
+            ) `
+            -Remediation @(
+                "Set the toggle to No and Save"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.20" "Ensure that 'Owners can manage group membership requests in My Groups' is set..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_21 {
+    Invoke-Check "5.21 (L2)" "Ensure that 'Users can create Microsoft 365 groups in Azure portals, API or PowerShell' is set to 'No' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Groups > General",
+                "'Users can create Microsoft 365 groups in Azure portals, API or PowerShell' = No"
+            ) `
+            -Remediation @(
+                "Set the toggle to No and Save",
+                "Delegate M365 group creation to a specific group via Set-AzureADDirectorySetting"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.21" "Ensure that 'Users can create Microsoft 365 groups in Azure portals, API or P..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_22 {
+    Invoke-Check "5.22 (L1)" "Ensure that 'Require Multifactor Authentication to register or join devices with Microsoft Entra' is set to 'Yes' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Devices > Device settings",
+                "'Require Multi-Factor Authentication to register or join devices with Microsoft Entra' = Yes"
+            ) `
+            -Remediation @(
+                "Set the toggle to Yes and Save (modern tenants should rely on a CA policy with 'Register or join devices' user action instead)"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.22" "Ensure that 'Require Multifactor Authentication to register or join devices w..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_24 {
+    Invoke-Check "5.24 (L2)" "Ensure that a custom role is assigned permissions for administering resource locks (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Subscription > Access control (IAM) > Roles: enumerate custom roles",
+                "Verify a custom role grants only Microsoft.Authorization/locks/* and is scoped to the appropriate MG/Subscription",
+                "No one has 'Owner' solely for lock management"
+            ) `
+            -Remediation @(
+                "Create custom role: New-AzRoleDefinition with Actions=Microsoft.Authorization/locks/*, AssignableScopes=/subscriptions/<id>",
+                "Assign this role to the identities responsible for lock management"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.24" "Ensure that a custom role is assigned permissions for administering resource ..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_25 {
+    Invoke-Check "5.25 (L2)" "Ensure that 'Subscription leaving Microsoft Entra tenant' and 'Subscription entering Microsoft Entra tenant' is set to 'Permit no one' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Subscriptions > Manage Policies (or Entra ID > Properties > Manage Security defaults link: 'Subscription policy')",
+                "Both 'Exporting subscriptions from this directory' and 'Importing subscriptions into this directory' = Permit no one"
+            ) `
+            -Remediation @(
+                "Set both options to 'Permit no one' (tenant-root group Owner required) and Save"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.25" "Ensure that 'Subscription leaving Microsoft Entra tenant' and 'Subscription e..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_26 {
+    Invoke-Check "5.26 (L1)" "Ensure fewer than 5 users have global administrator assignment (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Roles & admins > Global Administrator > Assignments",
+                "Count permanent + eligible members - should be < 5 and include 2 break-glass accounts"
+            ) `
+            -Remediation @(
+                "Remove non-essential Global Administrators",
+                "Assign narrower roles (Exchange, SharePoint, Security, Compliance) via PIM eligibility instead"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.26" "Ensure fewer than 5 users have global administrator assignment" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-5_28 {
+    Invoke-Check "5.28 (L2)" "Ensure passwordless authentication methods are considered (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Protection > Authentication methods > Policies",
+                "Verify at least one passwordless method is Enabled and rolled out: FIDO2 security key, Microsoft Authenticator (phone sign-in) or Windows Hello for Business"
+            ) `
+            -Remediation @(
+                "Enable desired passwordless method(s) under Authentication methods > Policies and scope to a pilot group, then expand"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "5.28" "Ensure passwordless authentication methods are considered" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-6_1_1_3 {
+    Invoke-Check "6.1.1.3 (L2)" "Ensure the storage account containing the container with activity logs is encrypted with customer-managed key (CMK) (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Find the storage account receiving the 'insights-activity-logs' container",
+                "Storage account > Encryption: verify 'Customer-managed keys' is selected and references your Key Vault key"
+            ) `
+            -Remediation @(
+                "Storage account > Encryption > Customer-managed keys: select Key Vault + key + user-assigned identity with wrap/unwrap",
+                "Key Vault must have soft delete + purge protection"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "6.1.1.3" "Ensure the storage account containing the container with activity logs is enc..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-6_1_1_5 {
+    Invoke-Check "6.1.1.5 (L2)" "Ensure that Network Security Group Flow logs are captured and sent to Log Analytics (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Network Watcher > NSG flow logs: every NSG has a flow log enabled",
+                "Flow log > Traffic Analytics: enabled and pointing to a Log Analytics workspace"
+            ) `
+            -Remediation @(
+                "Enable NSG flow log (v2) for each NSG",
+                "Enable Traffic Analytics with processing interval 10 min and select a Log Analytics workspace"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "6.1.1.5" "Ensure that Network Security Group Flow logs are captured and sent to Log Ana..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-6_1_1_7 {
+    Invoke-Check "6.1.1.7 (L2)" "Ensure that virtual network flow logs are captured and sent to Log Analytics (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Network Watcher > Flow logs > VNet flow logs: a flow log exists for each VNet",
+                "Traffic Analytics enabled and pointing to Log Analytics"
+            ) `
+            -Remediation @(
+                "Create VNet flow log for each VNet targeting a Storage Account",
+                "Enable Traffic Analytics > Log Analytics workspace"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "6.1.1.7" "Ensure that virtual network flow logs are captured and sent to Log Analytics" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-6_1_1_8 {
+    Invoke-Check "6.1.1.8 (L2)" "Ensure that a Microsoft Entra diagnostic setting exists to send Microsoft Graph activity logs to an appropriate destination (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Monitoring & health > Diagnostic settings",
+                "Verify a setting exists that exports 'MicrosoftGraphActivityLogs' to Log Analytics / Storage / Event Hub"
+            ) `
+            -Remediation @(
+                "Add diagnostic setting, select 'MicrosoftGraphActivityLogs', send to Log Analytics workspace (retention >= 90 days)"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "6.1.1.8" "Ensure that a Microsoft Entra diagnostic setting exists to send Microsoft Gra..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-6_1_1_9 {
+    Invoke-Check "6.1.1.9 (L2)" "Ensure that a Microsoft Entra diagnostic setting exists to send Microsoft Entra activity logs to an appropriate destination (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com" `
+            -AuditSteps @(
+                "Identity > Monitoring & health > Diagnostic settings",
+                "A setting exports AuditLogs, SignInLogs, NonInteractiveUserSignInLogs, ServicePrincipalSignInLogs, ManagedIdentitySignInLogs, ProvisioningLogs, ADFSSignInLogs, RiskyUsers, UserRiskEvents, NetworkAccessTrafficLogs, RiskyServicePrincipals, ServicePrincipalRiskEvents to Log Analytics / Storage / Event Hub"
+            ) `
+            -Remediation @(
+                "Add diagnostic setting covering all Entra log categories; destination = Log Analytics or SIEM-bound Event Hub",
+                "Retain for >= 90 days (regulatory: 1 year+)"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "6.1.1.9" "Ensure that a Microsoft Entra diagnostic setting exists to send Microsoft Ent..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-6_1_1_10 {
+    Invoke-Check "6.1.1.10 (L2)" "Ensure that Intune logs are captured and sent to Log Analytics (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://intune.microsoft.com" `
+            -AuditSteps @(
+                "Intune admin center > Tenant administration > Diagnostic settings",
+                "A setting sends AuditLogs + OperationalLogs + DeviceComplianceOrg to Log Analytics"
+            ) `
+            -Remediation @(
+                "Add diagnostic setting in Intune > Tenant administration > Diagnostic settings",
+                "Select all log categories, destination = Log Analytics workspace"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "6.1.1.10" "Ensure that Intune logs are captured and sent to Log Analytics" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-6_1_4 {
+    Invoke-Check "6.1.4 (L1)" "Ensure that Azure Monitor Resource Logging is Enabled for All Services that Support it (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Azure Policy: verify the built-in initiative 'Enable Azure Monitor for ...' (or 'Configure Azure Monitor resource logs') is assigned and compliant",
+                "Azure Resource Graph query: resources where diagnosticSettings is null"
+            ) `
+            -Remediation @(
+                "Assign built-in Azure Policy: 'Enable diagnostic logging via diagnostic settings' for each resource type (Storage, Key Vault, SQL, etc.)",
+                "Target all subscriptions via management group"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "6.1.4" "Ensure that Azure Monitor Resource Logging is Enabled for All Services that S..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-6_1_5 {
+    Invoke-Check "6.1.5 (L2)" "Ensure that SKU Basic/Consumption is not used on artifacts that need to be monitored (particularly for production workloads) (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Inventory production resources (App Service Plan, SQL DB, Key Vault, Log Analytics, etc.)",
+                "Confirm no production artefact uses Basic/Consumption SKU (no diagnostic logging support)"
+            ) `
+            -Remediation @(
+                "Upgrade production artefacts to Standard/Premium SKUs that support resource logging",
+                "Restrict Basic/Consumption SKUs in non-prod only via Azure Policy (allowed SKUs)"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "6.1.5" "Ensure that SKU Basic/Consumption is not used on artifacts that need to be mo..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-6_2 {
+    Invoke-Check "6.2 (L2)" "Ensure that Resource Locks are set for Mission-Critical Azure Resources (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "For each mission-critical resource (or its RG): Settings > Locks",
+                "At minimum one CanNotDelete lock; for immutable resources a ReadOnly lock"
+            ) `
+            -Remediation @(
+                "Add lock: New-AzResourceLock -LockName 'DoNotDelete' -LockLevel CanNotDelete -Scope <resourceId>",
+                "Prefer locks at resource-group or subscription scope for broad coverage"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "6.2" "Ensure that Resource Locks are set for Mission-Critical Azure Resources" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-7_7 {
+    Invoke-Check "7.7 (L1)" "Ensure that Public IP addresses are Evaluated on a Periodic Basis (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Public IP addresses blade: list all Public IPs in the subscription",
+                "Confirm each is required; unassigned/static-reserved IPs reviewed and removed",
+                "Establish a recurring review (ticket/runbook) - at minimum monthly"
+            ) `
+            -Remediation @(
+                "Delete unused Public IPs: Remove-AzPublicIpAddress",
+                "Tag required IPs with Owner/Purpose; schedule monthly audit report via Resource Graph"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "7.7" "Ensure that Public IP addresses are Evaluated on a Periodic Basis" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-7_9 {
+    Invoke-Check "7.9 (L2)" "Ensure 'Authentication type' is set to 'Azure Active Directory' only for Azure VPN Gateway point-to-site configuration (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Virtual network gateway > Point-to-site configuration",
+                "'Tunnel type' = OpenVPN (SSL), 'Authentication type' = Microsoft Entra (Azure AD) only"
+            ) `
+            -Remediation @(
+                "Point-to-site configuration > Authentication type = Azure AD only (uncheck certificate / RADIUS)",
+                "Supply Entra tenant/audience/issuer values and Save"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "7.9" "Ensure 'Authentication type' is set to 'Azure Active Directory' only for Azur..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-7_16 {
+    Invoke-Check "7.16 (L2)" "Ensure Azure Network Security Perimeter is used to secure Azure platform-as-a-service resources (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Network Security Perimeters blade",
+                "A perimeter exists that associates PaaS resources (Storage, Key Vault, SQL, Event Hub, etc.) with inbound/outbound access rules and logging"
+            ) `
+            -Remediation @(
+                "Create a Network Security Perimeter, associate PaaS resources",
+                "Configure inbound/outbound profile rules (allowed subscriptions, FQDNs, IP ranges) and enable logs to Log Analytics"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "7.16" "Ensure Azure Network Security Perimeter is used to secure Azure platform-as-a..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-8_1_3_2 {
+    Invoke-Check "8.1.3.2 (L2)" "Ensure that 'Vulnerability assessment for machines' component status is set to 'On' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Microsoft Defender for Cloud > Environment settings > subscription > Defender plans",
+                "Servers > Settings & monitoring: 'Vulnerability assessment for machines' = On (Microsoft Defender Vulnerability Management)"
+            ) `
+            -Remediation @(
+                "Enable 'Vulnerability assessment for machines'; choose Microsoft Defender Vulnerability Management or Qualys provider",
+                "Ensure Defender for Servers P2 is enabled"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "8.1.3.2" "Ensure that 'Vulnerability assessment for machines' component status is set t..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-8_1_3_4 {
+    Invoke-Check "8.1.3.4 (L2)" "Ensure that 'Agentless scanning for machines' component status is set to 'On' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Defender for Cloud > Environment settings > Defender plans > Servers > Settings & monitoring",
+                "'Agentless scanning for machines' = On"
+            ) `
+            -Remediation @(
+                "Enable 'Agentless scanning for machines' (requires Defender for Servers Plan 2)"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "8.1.3.4" "Ensure that 'Agentless scanning for machines' component status is set to 'On'" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-8_1_3_5 {
+    Invoke-Check "8.1.3.5 (L2)" "Ensure that 'File Integrity Monitoring' component status is set to 'On' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Defender for Cloud > Environment settings > Defender plans > Servers > Settings & monitoring",
+                "'File Integrity Monitoring' = On (via Defender for Endpoint)"
+            ) `
+            -Remediation @(
+                "Enable File Integrity Monitoring; target Log Analytics workspace or MDE as required",
+                "Requires Defender for Servers Plan 2"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "8.1.3.5" "Ensure that 'File Integrity Monitoring' component status is set to 'On'" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-8_1_5_2 {
+    Invoke-Check "8.1.5.2 (L1)" "Ensure Advanced Threat Protection Alerts for Storage Accounts Are Monitored (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Defender for Cloud > Security alerts: confirm Storage-related alert subscriptions are delivered (email, Logic Apps, SIEM)",
+                "Environment settings > Email notifications: Owner/Service Admin + additional recipients are set"
+            ) `
+            -Remediation @(
+                "Environment settings > Email notifications: add SecOps distribution list, set 'Notify about alerts with severity' = Medium or higher",
+                "Integrate with SIEM via Event Hub / Graph Security API"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "8.1.5.2" "Ensure Advanced Threat Protection Alerts for Storage Accounts Are Monitored" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-8_1_11 {
+    Invoke-Check "8.1.11 (L1)" "Ensure that Microsoft Cloud Security Benchmark policies are not set to 'Disabled' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Defender for Cloud > Environment settings > subscription > Security policy",
+                "Microsoft Cloud Security Benchmark: no policies in 'Disabled' state (all Audit/Deny as appropriate)"
+            ) `
+            -Remediation @(
+                "Set any Disabled MCSB policy back to AuditIfNotExists / DeployIfNotExists / Deny per baseline",
+                "Document any exceptions and review quarterly"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "8.1.11" "Ensure that Microsoft Cloud Security Benchmark policies are not set to 'Disab..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-8_1_16 {
+    Invoke-Check "8.1.16 (L2)" "Ensure that Microsoft Defender External Attack Surface Monitoring (EASM) is enabled (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Search marketplace / resource for 'Defender EASM' - a workspace exists and is scoped to the organisation seed list",
+                "Workspace > Overview shows discovered assets and last discovery run"
+            ) `
+            -Remediation @(
+                "Create a Defender EASM resource, add a seed (domain/IP) and run discovery",
+                "Review discovered assets and assign owners"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "8.1.16" "Ensure that Microsoft Defender External Attack Surface Monitoring (EASM) is e..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-8_2_1 {
+    Invoke-Check "8.2.1 (L2)" "Ensure That Microsoft Defender for IoT Hub Is Set To 'On' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Defender for Cloud > Environment settings > subscription > Defender plans",
+                "Locate 'IoT' (or IoT Hub) and confirm Status = On"
+            ) `
+            -Remediation @(
+                "Toggle Defender for IoT to On",
+                "Review IoT alerts under Defender for Cloud > Security alerts"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "8.2.1" "Ensure That Microsoft Defender for IoT Hub Is Set To 'On'" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-8_3_10 {
+    Invoke-Check "8.3.10 (L2)" "Ensure that Azure Key Vault Managed HSM is used when required (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Inventory applications handling high-value keys (payments, signing, root-of-trust)",
+                "Such workloads use a Managed HSM (FIPS 140-2 Level 3) rather than Key Vault Standard/Premium"
+            ) `
+            -Remediation @(
+                "Provision a Managed HSM, grant Local RBAC roles (Crypto Officer/User)",
+                "Migrate high-value keys from Key Vault to Managed HSM"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "8.3.10" "Ensure that Azure Key Vault Managed HSM is used when required" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-9_3_9 {
+    Invoke-Check "9.3.9 (L1)" "Ensure Azure Resource Manager Delete locks are applied to Azure Storage Accounts (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "Storage account > Settings > Locks: at least one CanNotDelete lock exists",
+                "Get-AzResourceLock -ResourceName <acct> -ResourceType Microsoft.Storage/storageAccounts -ResourceGroupName <rg>"
+            ) `
+            -Remediation @(
+                "New-AzResourceLock -LockName 'DoNotDelete' -LockLevel CanNotDelete -Scope <storageAccountId>",
+                "Apply via Azure Policy 'Require delete lock on storage accounts' at subscription/MG scope"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "9.3.9" "Ensure Azure Resource Manager Delete locks are applied to Azure Storage Accounts" "MANL" "Requires Azure portal verification."
+    }
+}
+
+function Check-MANL-9_3_10 {
+    Invoke-Check "9.3.10 (L2)" "Ensure Azure Resource Manager ReadOnly locks are considered for Azure Storage Accounts (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://portal.azure.com" `
+            -AuditSteps @(
+                "For storage accounts that should be immutable (log archives), Settings > Locks includes a ReadOnly lock"
+            ) `
+            -Remediation @(
+                "New-AzResourceLock -LockName 'ReadOnly' -LockLevel ReadOnly -Scope <storageAccountId>",
+                "Be aware ReadOnly locks block key rotation and data-plane operations that update ACLs"
+            )
+        Write-Manl "Manual verification required - see audit steps above."
+        Add-Result "9.3.10" "Ensure Azure Resource Manager ReadOnly locks are considered for Azure Storage..." "MANL" "Requires Azure portal verification."
+    }
+}
+
+
+# ===============================================================================
 #  SUMMARY
 # ===============================================================================
 function Show-Summary {
-    $total  = $Script:PassCount + $Script:FailCount + $Script:WarnCount
+    $total  = $Script:PassCount + $Script:FailCount + $Script:WarnCount + $Script:ManlCount
     $line82 = "=" * 82
     Write-Host ""
     Write-Host $line82 -ForegroundColor Cyan
@@ -2953,7 +4023,7 @@ function Show-Summary {
     Write-Host ("  {0,-12} {1,-50} {2}" -f ("-"*12),("-"*50),("-"*6))
 
     foreach ($r in $Script:Results) {
-        $col = switch ($r.Status) { "PASS"{"Green"} "FAIL"{"Red"} default{"Magenta"} }
+        $col = switch ($r.Status) { "PASS"{"Green"} "FAIL"{"Red"} "MANL"{"Cyan"} default{"Magenta"} }
         $t   = if ($r.Title.Length -gt 50) { $r.Title.Substring(0,47) + "..." } else { $r.Title }
         Write-Host ("  {0,-12} {1,-50} " -f $r.Section, $t) -NoNewline
         Write-Host $r.Status -ForegroundColor $col
@@ -2969,6 +4039,7 @@ function Show-Summary {
         Write-Host ("  PASS       : {0,4}  ({1:P0})" -f $Script:PassCount, ($Script:PassCount / $total)) -ForegroundColor Green
         Write-Host ("  FAIL       : {0,4}  ({1:P0})" -f $Script:FailCount, ($Script:FailCount / $total)) -ForegroundColor Red
         Write-Host ("  WARN       : {0,4}  ({1:P0})" -f $Script:WarnCount, ($Script:WarnCount / $total)) -ForegroundColor Magenta
+        Write-Host ("  MANL       : {0,4}  ({1:P0})" -f $Script:ManlCount, ($Script:ManlCount / $total)) -ForegroundColor Cyan
     }
     Write-Host $line82 -ForegroundColor Cyan
     Write-Host ""
@@ -2990,7 +4061,7 @@ Clear-Host
 
 Write-Host ""
 Write-Host "+==================================================================================+" -ForegroundColor Cyan
-Write-Host "|   CIS Microsoft Azure Foundations Benchmark v5.0.0 - 103 Checks (Auto + Manual)    |" -ForegroundColor Cyan
+Write-Host "|   CIS Microsoft Azure Foundations Benchmark v5.0.0 - 103 Auto + 62 Manual         |" -ForegroundColor Cyan
 Write-Host "|   Subscription : $SubscriptionId                          |" -ForegroundColor Cyan
 Write-Host "+==================================================================================+" -ForegroundColor Cyan
 
@@ -3043,6 +4114,72 @@ Check-9_3_1_1;  Check-9_3_1_2;  Check-9_3_1_3
 Check-9_3_2_1;  Check-9_3_2_2;  Check-9_3_2_3
 Check-9_3_3_1;  Check-9_3_4;    Check-9_3_5;    Check-9_3_6
 Check-9_3_7;    Check-9_3_8;    Check-9_3_11
+
+Write-Banner "SECTION MANL - Manual Checks (require portal verification)"
+Check-MANL-2_1_3
+Check-MANL-2_1_4
+Check-MANL-2_1_5
+Check-MANL-2_1_6
+Check-MANL-2_1_8
+Check-MANL-3_1_1
+Check-MANL-5_1_3
+Check-MANL-5_2_1
+Check-MANL-5_2_2
+Check-MANL-5_2_3
+Check-MANL-5_2_4
+Check-MANL-5_2_5
+Check-MANL-5_2_6
+Check-MANL-5_2_7
+Check-MANL-5_2_8
+Check-MANL-5_3_1
+Check-MANL-5_3_2
+Check-MANL-5_3_4
+Check-MANL-5_3_5
+Check-MANL-5_3_6
+Check-MANL-5_3_7
+Check-MANL-5_5
+Check-MANL-5_6
+Check-MANL-5_7
+Check-MANL-5_8
+Check-MANL-5_9
+Check-MANL-5_10
+Check-MANL-5_11
+Check-MANL-5_12
+Check-MANL-5_13
+Check-MANL-5_17
+Check-MANL-5_18
+Check-MANL-5_19
+Check-MANL-5_20
+Check-MANL-5_21
+Check-MANL-5_22
+Check-MANL-5_24
+Check-MANL-5_25
+Check-MANL-5_26
+Check-MANL-5_28
+Check-MANL-6_1_1_3
+Check-MANL-6_1_1_5
+Check-MANL-6_1_1_7
+Check-MANL-6_1_1_8
+Check-MANL-6_1_1_9
+Check-MANL-6_1_1_10
+Check-MANL-6_1_4
+Check-MANL-6_1_5
+Check-MANL-6_2
+Check-MANL-7_7
+Check-MANL-7_9
+Check-MANL-7_16
+Check-MANL-8_1_3_2
+Check-MANL-8_1_3_4
+Check-MANL-8_1_3_5
+Check-MANL-8_1_5_2
+Check-MANL-8_1_11
+Check-MANL-8_1_16
+Check-MANL-8_2_1
+Check-MANL-8_3_10
+Check-MANL-9_3_9
+Check-MANL-9_3_10
+
+
 
 Write-Banner "RESULTS SUMMARY"
 Show-Summary

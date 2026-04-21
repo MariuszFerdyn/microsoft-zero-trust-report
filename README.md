@@ -4,10 +4,16 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 
 ## Benchmarks
 
-| Benchmark | Version | Automated Checks | Script | Permissions Helper |
-|-----------|---------|------------------:|--------|--------------------|
-| CIS Microsoft Azure Foundations | v5.0.0 | 103 | `CIS_Azure_Benchmark_Full.ps1` | `CIS_Azure_Permissions.ps1` |
-| CIS Microsoft 365 Foundations | v6.0.1 | 129 | `CIS_M365_Benchmark_Full.ps1` | `CIS_M365_Permissions.ps1` |
+| Benchmark | Version | Automated Checks | Manual Checks | Script | Permissions Helper |
+|-----------|---------|------------------:|--------------:|--------|--------------------|
+| CIS Microsoft Azure Foundations | v5.0.0 | 103 | 62 | `CIS_Azure_Benchmark_Full.ps1` | `CIS_Azure_Permissions.ps1` |
+| CIS Microsoft 365 Foundations | v6.0.1 | 129 | 11 | `CIS_M365_Benchmark_Full.ps1` | `CIS_M365_Permissions.ps1` |
+
+> **Manual (MANL) checks** cover CIS items that cannot be fully verified via
+> API. The scripts still surface them in a dedicated `SECTION MANL` block,
+> print the portal path, audit steps, and remediation, and — where possible —
+> pull diagnostic context from Graph / Exchange / Teams to help the operator
+> answer the item. MANL results are recorded in the CSV with `Status = MANL`.
 
 ---
 
@@ -17,12 +23,14 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 
 | Section | Area | Checks |
 |---------|------|-------:|
-| 2 | Databricks | 7 |
-| 5 | Identity / Entra ID | 9 |
-| 6 | Logging & Monitoring | 22 |
-| 7 | Networking | 17 |
-| 8 | Security (Defender, Key Vault, Bastion, DDoS) | 30 |
-| 9 | Storage | 18 |
+| 2 | Databricks | 7 automated + 5 manual |
+| 3 | Virtual Machines | 1 manual |
+| 5 | Identity / Entra ID | 9 automated + 34 manual |
+| 6 | Logging & Monitoring | 22 automated + 9 manual |
+| 7 | Networking | 17 automated + 3 manual |
+| 8 | Security (Defender, Key Vault, Bastion, DDoS) | 30 automated + 8 manual |
+| 9 | Storage | 18 automated + 2 manual |
+| MANL | Manual checks (CIS items marked _Manual_) | 62 total, grouped by origin section |
 
 > **Multi-resource coverage:** checks that target resource types which can exist more than once
 > (Databricks workspaces, NSGs, VNets, Bastion hosts, VPN Gateways, App Services, Public IPs, Storage
@@ -100,6 +108,7 @@ Results are saved to a timestamped CSV file: `CIS_Azure_Results_<date>.csv`
 | 7 | SharePoint Online & OneDrive | Sharing policies, access controls |
 | 8 | Microsoft Teams | Meeting policies, external access, guest access |
 | 9 | Power BI / Fabric | Tenant settings, admin configuration |
+| MANL | Manual checks (CIS items marked _Manual_) | Break-glass accounts, Sway sharing, MDCA configuration, Entra portal restrictions, SSPR, SharePoint security-group sharing, Teams app permission policies, password hash sync |
 
 ### Prerequisites
 
@@ -170,8 +179,18 @@ Results are saved to a timestamped CSV file: `CIS_M365_Results_<date>.csv`
 ## Output Format
 
 Both benchmark scripts produce:
-- **Console output** with color-coded results: `[PASS]`, `[FAIL]`, `[WARN]`, `[SKIP]`
+- **Console output** with color-coded results: `[PASS]`, `[FAIL]`, `[WARN]`, `[SKIP]`, `[MANL]`
 - **CSV report** with columns: Section, Title, Status, Detail
+
+Status meanings:
+
+| Status | Meaning |
+|--------|---------|
+| `PASS` | The automated check found the tenant to be compliant. |
+| `FAIL` | The automated check found the tenant to be non-compliant. |
+| `WARN` | The check could not run (missing permission / service not connected). Needs investigation. |
+| `SKIP` | The check does not apply to this tenant (e.g. `.onmicrosoft.com`-only domains for DMARC). |
+| `MANL` | CIS item documented as **Manual**. Requires an administrator to verify in the portal; the script prints the portal path, audit steps, and remediation. |
 
 ### Sample console output (M365 benchmark)
 
@@ -252,6 +271,24 @@ Both benchmark scripts produce:
  [FAIL] Any user can create Bookings pages (BookingsMailboxCreationEnabled = True).
  Remediation: Exchange Admin > Settings > Bookings > restrict to specific users
 ```
+
+## Contributing / Agent instructions
+
+Rules for human contributors and AI agents (Copilot, Copilot Desktop, etc.):
+
+1. **CIS benchmarks must include Manual (MANL) steps.** When the CIS
+   documentation marks an item `(Manual)`, add it to the benchmark script as
+   a `MANL`-status check (category `MANL`, function `Check-MANL-<section>`)
+   with the portal path, audit steps, remediation, and references.
+2. **Keep `README.md` up to date** whenever coverage totals, status
+   categories, CLI parameters, prerequisites, or sample output change.
+3. **Verify / update the Permissions helper** after adding new functionality.
+   Any new Graph scope, directory role, or API permission must be added to
+   the helper's grant list and verification table. If no new permission is
+   needed, say so explicitly in the commit message.
+
+The full rules live in [`.github/copilot-instructions.md`](.github/copilot-instructions.md)
+and are summarised in [`AGENTS.md`](AGENTS.md).
 
 ## License
 

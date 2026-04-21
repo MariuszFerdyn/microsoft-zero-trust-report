@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    CIS Microsoft 365 Foundations Benchmark v6.0.1 - All 129 Automated Checks
+    CIS Microsoft 365 Foundations Benchmark v6.0.1 - All 129 Automated Checks + 11 Manual Checks
     Version 3 - All errors from report fixed.
 
 .DESCRIPTION
@@ -85,6 +85,7 @@ param(
 $Script:PassCount      = 0
 $Script:FailCount      = 0
 $Script:WarnCount      = 0
+$Script:ManlCount      = 0
 $Script:Results        = [System.Collections.Generic.List[object]]::new()
 $Script:ExoConnected   = $false
 $Script:SpoConnected   = $false
@@ -124,6 +125,7 @@ function Write-CheckHeader {
 function Write-Pass { param([string]$M); Write-Host "  [PASS] $M" -ForegroundColor Green;   $Script:PassCount++ }
 function Write-Fail { param([string]$M); Write-Host "  [FAIL] $M" -ForegroundColor Red;     $Script:FailCount++ }
 function Write-Warn { param([string]$M); Write-Host "  [WARN] $M" -ForegroundColor Magenta; $Script:WarnCount++ }
+function Write-Manl { param([string]$M); Write-Host "  [MANL] $M" -ForegroundColor Cyan;    $Script:ManlCount++ }
 function Write-Info { param([string]$M); Write-Host "    $M"       -ForegroundColor Gray }
 function Write-Skip { param([string]$M); Write-Host "  [SKIP] $M" -ForegroundColor DarkGray }
 
@@ -3148,10 +3150,312 @@ function Check-9_1_11 { Check-9_PBI "9.1.11 (L1)" "Ensure service principals can
 function Check-9_1_12 { Check-9_PBI "9.1.12 (L1)" "Ensure service principals cannot manage workspaces in Power BI"                           "ServicePrincipalCanManageWorkspaces"  $false }
 
 # ===============================================================================
+#  SECTION MANL - Manual Checks (CIS v6.0.1 items marked "Manual")
+# ===============================================================================
+#
+# These CIS Benchmark items cannot be fully verified via API and must be
+# reviewed by an administrator. Each check prints the audit procedure + the
+# remediation summary from the benchmark, pulls any helpful diagnostic data
+# when available, and records the result with Status = "MANL".
+#
+# Items covered:
+#   1.1.2     Two emergency access (break-glass) accounts defined
+#   1.3.8     Sways cannot be shared outside the organization
+#   2.2.1     Emergency access account activity is monitored
+#   2.4.3     Microsoft Defender for Cloud Apps is enabled and configured
+#   5.1.2.4   Access to the Entra admin center is restricted
+#   5.1.2.5   Option to remain signed in is hidden
+#   5.1.2.6   LinkedIn account connections disabled
+#   5.1.8.1   Password hash sync enabled for hybrid deployments
+#   5.2.4.1   Self-service password reset is set to 'All'
+#   7.2.8     External sharing restricted by security group
+#   8.4.1     Teams app permission policies are configured
+# ===============================================================================
+
+function Write-ManualAudit {
+    param(
+        [string[]]$AuditSteps,
+        [string[]]$Remediation,
+        [string]  $Portal,
+        [string[]]$References
+    )
+    if ($Portal) {
+        Write-Info "Portal: $Portal"
+    }
+    if ($AuditSteps) {
+        Write-Info "Audit:"
+        foreach ($s in $AuditSteps) { Write-Info "  - $s" }
+    }
+    if ($Remediation) {
+        Write-Info "Remediation:"
+        foreach ($s in $Remediation) { Write-Info "  - $s" }
+    }
+    if ($References) {
+        Write-Info "References:"
+        foreach ($r in $References) { Write-Info "  - $r" }
+    }
+}
+
+function Check-MANL-1_1_2 {
+    Invoke-Check "1.1.2 (L1)" "Ensure two emergency access accounts have been defined (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://admin.microsoft.com  +  https://entra.microsoft.com/" `
+            -AuditSteps @(
+                "Admin center > Users > Active Users: locate two dedicated break-glass accounts",
+                "Accounts must be: cloud-only, unlicensed, on .onmicrosoft.com domain, NOT tied to a person",
+                "Both accounts assigned the Global Administrator directory role",
+                "Entra admin center > Protection > Conditional Access: at least one break-glass account excluded from ALL CA policies",
+                "Accounts use passkey (FIDO2) or certificate-based authentication to satisfy MFA"
+            ) `
+            -Remediation @(
+                "Create two GA accounts per the criteria above, configure FIDO2 or cert-based MFA",
+                "Exclude at least one from every Conditional Access policy",
+                "Store credentials / FIDO2 keys in a physically secure, fireproof location"
+            ) `
+            -References @(
+                "https://learn.microsoft.com/entra/identity/role-based-access-control/security-emergency-access"
+            )
+
+        # Helper: surface candidate break-glass accounts (cloud-only, unlicensed GAs on .onmicrosoft.com)
+        try {
+            $gaRole = Get-MgDirectoryRole -Filter "RoleTemplateId eq '62e90394-69f5-4237-9190-012177145e10'" -EA Stop
+            $members = Get-MgDirectoryRoleMember -DirectoryRoleId $gaRole.Id -All -EA Stop
+            $candidates = @()
+            foreach ($m in $members) {
+                if ($m.AdditionalProperties.'@odata.type' -ne '#microsoft.graph.user') { continue }
+                $u = Get-MgUser -UserId $m.Id -Property DisplayName,UserPrincipalName,OnPremisesSyncEnabled,AssignedLicenses -EA SilentlyContinue
+                if (-not $u) { continue }
+                $cloudOnly   = -not $u.OnPremisesSyncEnabled
+                $onMsDomain  = $u.UserPrincipalName -match '\.onmicrosoft\.com$'
+                $unlicensed  = (-not $u.AssignedLicenses) -or ($u.AssignedLicenses.Count -eq 0)
+                if ($cloudOnly -and $onMsDomain -and $unlicensed) {
+                    $candidates += "$($u.DisplayName) <$($u.UserPrincipalName)>"
+                }
+            }
+            if ($candidates.Count -gt 0) {
+                Write-Info "Candidate break-glass accounts (cloud-only, unlicensed, .onmicrosoft.com GAs):"
+                foreach ($c in $candidates) { Write-Info "  -> $c" }
+            } else {
+                Write-Info "No obvious break-glass candidates detected among Global Administrators."
+            }
+            Write-Manl "Verify manually that exactly two dedicated emergency access accounts exist and are CA-excluded."
+            Add-Result "1.1.2" "Two emergency access accounts defined" "MANL" ("Candidates: {0}" -f (@($candidates) -join '; '))
+        } catch {
+            Write-Manl "Manual verification required (could not enumerate GAs: $($_.Exception.Message))."
+            Add-Result "1.1.2" "Two emergency access accounts defined" "MANL" "Manual review required."
+        }
+    }
+}
+
+function Check-MANL-1_3_8 {
+    Invoke-Check "1.3.8 (L2)" "Ensure that Sways cannot be shared with people outside of your organization (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://admin.microsoft.com" `
+            -AuditSteps @(
+                "Settings > Org settings > Services > Sway",
+                "Under Sharing, ensure 'Let people in your organization share their sways with people outside your organization' is UNCHECKED"
+            ) `
+            -Remediation @(
+                "Uncheck the external-sharing option under Sway settings and click Save"
+            )
+        Write-Manl "No public API surfaces the Sway external-sharing toggle - verify in the UI."
+        Add-Result "1.3.8" "Sway external sharing disabled" "MANL" "Requires admin center UI verification."
+    }
+}
+
+function Check-MANL-2_2_1 {
+    Invoke-Check "2.2.1 (L1)" "Ensure emergency access account activity is monitored (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://security.microsoft.com" `
+            -AuditSteps @(
+                "Cloud Apps > Policies > Policy management",
+                "Locate an Activity policy with: Severity=High, Category=Privileged accounts, Act on=Single activity",
+                "Filter 'Activity type equals Log on' AND 'User Name equals <Emergency access account>'",
+                "Alerts configured (e.g., email) for every break-glass account"
+            ) `
+            -Remediation @(
+                "Create a Defender for Cloud Apps Activity policy covering all break-glass accounts",
+                "Alternatively, use Azure Monitor / Sentinel alerts on sign-in logs for those UPNs"
+            )
+        Write-Manl "Defender for Cloud Apps policy inventory is not exposed via Graph - verify in portal."
+        Add-Result "2.2.1" "Emergency access account activity monitored" "MANL" "Requires Defender for Cloud Apps UI verification."
+    }
+}
+
+function Check-MANL-2_4_3 {
+    Invoke-Check "2.4.3 (L2)" "Ensure Microsoft Defender for Cloud Apps is enabled and configured (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://security.microsoft.com" `
+            -AuditSteps @(
+                "System > Settings > Cloud apps",
+                "Connected apps > App connectors: both 'Microsoft 365' and 'Microsoft Azure' are Connected",
+                "Cloud Discovery > Microsoft Defender for Endpoint integration is Enabled",
+                "Information Protection > Files: 'Enable file monitoring' is Checked"
+            ) `
+            -Remediation @(
+                "Enable file monitoring under Information Protection > Files",
+                "Enable Defender for Endpoint integration (requires MDE license) and set Notification URL",
+                "Add App connectors for both Microsoft 365 and Microsoft Azure"
+            )
+        Write-Manl "MDCA connector / discovery state is not available via Graph - verify in portal."
+        Add-Result "2.4.3" "MDCA enabled and configured" "MANL" "Requires Defender for Cloud Apps UI verification."
+    }
+}
+
+function Check-MANL-5_1_2_4 {
+    Invoke-Check "5.1.2.4 (L1)" "Ensure access to the Entra admin center is restricted (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com/" `
+            -AuditSteps @(
+                "Entra ID > Users > User settings",
+                "Under 'Administration center', 'Restrict access to Microsoft Entra admin center' = Yes"
+            ) `
+            -Remediation @(
+                "Set 'Restrict access to Microsoft Entra admin center' to Yes and Save"
+            )
+        Write-Manl "This toggle has no stable Graph API - verify in the Entra admin center."
+        Add-Result "5.1.2.4" "Entra admin center access restricted" "MANL" "Requires UI verification."
+    }
+}
+
+function Check-MANL-5_1_2_5 {
+    Invoke-Check "5.1.2.5 (L2)" "Ensure the option to remain signed in is hidden (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com/" `
+            -AuditSteps @(
+                "Entra ID > Users > User settings",
+                "'Show keep user signed in' = No"
+            ) `
+            -Remediation @(
+                "Set 'Show keep user signed in' to No and Save (company branding)"
+            )
+        Write-Manl "'Keep me signed in' prompt is part of company branding - verify in the Entra admin center."
+        Add-Result "5.1.2.5" "'Keep me signed in' hidden" "MANL" "Requires UI verification."
+    }
+}
+
+function Check-MANL-5_1_2_6 {
+    Invoke-Check "5.1.2.6 (L2)" "Ensure 'LinkedIn account connections' is disabled (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com/" `
+            -AuditSteps @(
+                "Entra ID > Users > User settings",
+                "Under 'LinkedIn account connections', No is highlighted"
+            ) `
+            -Remediation @(
+                "Set 'LinkedIn account connections' to No and Save"
+            )
+        Write-Manl "LinkedIn integration toggle is not exposed by Graph - verify in the UI."
+        Add-Result "5.1.2.6" "LinkedIn account connections disabled" "MANL" "Requires UI verification."
+    }
+}
+
+function Check-MANL-5_1_8_1 {
+    Invoke-Check "5.1.8.1 (L1)" "Ensure password hash sync is enabled for hybrid deployments (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com/" `
+            -AuditSteps @(
+                "Entra ID > Entra Connect > Connect Sync: status shows 'Password hash synchronization is enabled' / heartbeat detected",
+                "OR on the Entra Connect server: Get-ADSyncAADCompanyFeature -> PasswordHashSync = True"
+            ) `
+            -Remediation @(
+                "Run Entra Connect > Customize synchronization options > enable Password hash synchronization",
+                "Applies only to hybrid tenants using Entra Connect sync (not federated domains)"
+            )
+
+        # Helper: indicate whether this tenant is actually hybrid
+        try {
+            $org = Get-MgOrganization -EA Stop
+            $dirSync = $org.OnPremisesSyncEnabled
+            if ($dirSync) {
+                Write-Info "Tenant directory sync (OnPremisesSyncEnabled): True - this recommendation APPLIES."
+                Add-Result "5.1.8.1" "Password hash sync enabled (hybrid)" "MANL" "DirSync enabled - verify PHS on Entra Connect server."
+            } else {
+                Write-Info "Tenant directory sync (OnPremisesSyncEnabled): False - cloud-only tenant, recommendation not applicable."
+                Add-Result "5.1.8.1" "Password hash sync enabled (hybrid)" "MANL" "Cloud-only tenant (DirSync disabled) - N/A."
+            }
+        } catch {
+            Add-Result "5.1.8.1" "Password hash sync enabled (hybrid)" "MANL" "Manual review required."
+        }
+        Write-Manl "Verify on the Entra Connect server (Get-ADSyncAADCompanyFeature)."
+    }
+}
+
+function Check-MANL-5_2_4_1 {
+    Invoke-Check "5.2.4.1 (L1)" "Ensure 'Self service password reset enabled' is set to 'All' (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://entra.microsoft.com/" `
+            -AuditSteps @(
+                "Entra ID > Password reset > Properties",
+                "'Self service password reset enabled' = All"
+            ) `
+            -Remediation @(
+                "Set 'Self service password reset enabled' to All (requires Entra ID P1/P2)",
+                "Note: not available when using Entra Connect / Sync password writeback is separate"
+            )
+        Write-Manl "SSPR scope is not reliably exposed via Graph - verify in the Entra admin center."
+        Add-Result "5.2.4.1" "SSPR is enabled for 'All'" "MANL" "Requires UI verification."
+    }
+}
+
+function Check-MANL-7_2_8 {
+    Invoke-Check "7.2.8 (L2)" "Ensure external sharing is restricted by security group (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://admin.microsoft.com/sharepoint" `
+            -AuditSteps @(
+                "Policies > Sharing > scroll down and expand 'More external sharing settings'",
+                "'Allow only users in specific security groups to share externally' is CHECKED",
+                "'Manage security groups' is populated per company procedure",
+                "Also: Entra > Identity > External Identities > External collaboration settings must permit those groups to invite guests"
+            ) `
+            -Remediation @(
+                "Check 'Allow only users in specific security groups to share externally' and define the groups"
+            )
+        Write-Manl "The SharePoint security-group-based sharing list is not exposed via Graph - verify in SPO admin center."
+        Add-Result "7.2.8" "External sharing restricted by security group" "MANL" "Requires SPO admin center verification."
+    }
+}
+
+function Check-MANL-8_4_1 {
+    Invoke-Check "8.4.1 (L1)" "Ensure Teams app permission policies are configured (Manual)" {
+        Write-ManualAudit `
+            -Portal "https://admin.teams.microsoft.com" `
+            -AuditSteps @(
+                "Teams apps > Manage apps > Actions (top-right) > Org-wide app settings",
+                "Microsoft apps: 'Let users install and use available apps by default' = On (or less permissive)",
+                "Third-party apps: 'Let users install and use available apps by default' = Off",
+                "Custom apps: 'Let users install and use available apps by default' = Off",
+                "Custom apps: 'Let users interact with custom apps in preview' = Off"
+            ) `
+            -Remediation @(
+                "Set the four toggles above in Teams admin center > Manage apps > Org-wide app settings"
+            )
+
+        if ($Script:TeamsConnected) {
+            try {
+                $policy = Get-CsTeamsAppPermissionPolicy -Identity Global -EA Stop
+                Write-Info "Teams Global app permission policy:"
+                Write-Info "  DefaultCatalogAppsType   : $($policy.DefaultCatalogAppsType)"
+                Write-Info "  GlobalCatalogAppsType    : $($policy.GlobalCatalogAppsType)"
+                Write-Info "  PrivateCatalogAppsType   : $($policy.PrivateCatalogAppsType)"
+                Write-Manl "Review Global app permission policy above against CIS guidance (org-wide toggles must also be set via Teams admin UI)."
+                Add-Result "8.4.1" "Teams app permission policies configured" "MANL" ("Global policy: default={0} global={1} private={2}" -f $policy.DefaultCatalogAppsType,$policy.GlobalCatalogAppsType,$policy.PrivateCatalogAppsType)
+            } catch {
+                Write-Manl "Could not read Teams app policy: $($_.Exception.Message). Verify manually."
+                Add-Result "8.4.1" "Teams app permission policies configured" "MANL" "Manual review required."
+            }
+        } else {
+            Write-Manl "Teams PowerShell not connected - verify org-wide app settings in the Teams admin center."
+            Add-Result "8.4.1" "Teams app permission policies configured" "MANL" "Teams not connected - manual review."
+        }
+    }
+}
+
+# ===============================================================================
 #  SUMMARY
 # ===============================================================================
 function Show-Summary {
-    $total  = $Script:PassCount + $Script:FailCount + $Script:WarnCount
+    $total  = $Script:PassCount + $Script:FailCount + $Script:WarnCount + $Script:ManlCount
     $line82 = "=" * 82
     Write-Host ""
     Write-Host $line82 -ForegroundColor Cyan
@@ -3162,7 +3466,7 @@ function Show-Summary {
     Write-Host ("  {0,-12} {1,-50} {2}" -f ("-"*12),("-"*50),("-"*6))
 
     foreach ($r in $Script:Results) {
-        $col = switch ($r.Status) { "PASS"{"Green"} "FAIL"{"Red"} default{"Magenta"} }
+        $col = switch ($r.Status) { "PASS"{"Green"} "FAIL"{"Red"} "MANL"{"Cyan"} default{"Magenta"} }
         $t   = if ($r.Title.Length -gt 50) { $r.Title.Substring(0,47) + "..." } else { $r.Title }
         Write-Host ("  {0,-12} {1,-50} " -f $r.Section, $t) -NoNewline
         Write-Host $r.Status -ForegroundColor $col
@@ -3178,6 +3482,7 @@ function Show-Summary {
         Write-Host ("  PASS       : {0,4}  ({1:P0})" -f $Script:PassCount, ($Script:PassCount / $total)) -ForegroundColor Green
         Write-Host ("  FAIL       : {0,4}  ({1:P0})" -f $Script:FailCount, ($Script:FailCount / $total)) -ForegroundColor Red
         Write-Host ("  WARN       : {0,4}  ({1:P0})" -f $Script:WarnCount, ($Script:WarnCount / $total)) -ForegroundColor Magenta
+        Write-Host ("  MANL       : {0,4}  ({1:P0})" -f $Script:ManlCount, ($Script:ManlCount / $total)) -ForegroundColor Cyan
     }
     Write-Host $line82 -ForegroundColor Cyan
     Write-Host ""
@@ -3244,7 +3549,7 @@ Clear-Host
 
 Write-Host ""
 Write-Host "+==================================================================================+" -ForegroundColor Cyan
-Write-Host "|   CIS Microsoft 365 Foundations Benchmark v6.0.1 - 129 Automated Checks          |" -ForegroundColor Cyan
+Write-Host "|   CIS Microsoft 365 Foundations Benchmark v6.0.1 - 129 Automated + 11 Manual     |" -ForegroundColor Cyan
 Write-Host "|   Tenant : $TenantId                          |" -ForegroundColor Cyan
 Write-Host "+==================================================================================+" -ForegroundColor Cyan
 
@@ -3303,6 +3608,19 @@ Write-Banner "SECTION 9 - Power BI / Fabric"
 Check-9_1_1;  Check-9_1_2;  Check-9_1_3;  Check-9_1_4;  Check-9_1_5;  Check-9_1_6
 Check-9_1_7;  Check-9_1_8;  Check-9_1_9
 Check-9_1_10; Check-9_1_11; Check-9_1_12
+
+Write-Banner "SECTION MANL - Manual Checks (CIS items marked 'Manual')"
+Check-MANL-1_1_2
+Check-MANL-1_3_8
+Check-MANL-2_2_1
+Check-MANL-2_4_3
+Check-MANL-5_1_2_4
+Check-MANL-5_1_2_5
+Check-MANL-5_1_2_6
+Check-MANL-5_1_8_1
+Check-MANL-5_2_4_1
+Check-MANL-7_2_8
+Check-MANL-8_4_1
 
 Write-Banner "RESULTS SUMMARY"
 Show-Summary

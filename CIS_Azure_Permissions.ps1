@@ -25,6 +25,14 @@
       - RoleManagement.Read.All          -> Role assignments
       - Organization.Read.All            -> Tenant settings
 
+    Manual (MANL) checks:
+      The 62 MANL checks in CIS_Azure_Benchmark_Full.ps1 print portal path,
+      audit steps, and remediation for CIS items marked (Manual); they do not
+      call any Azure or Graph API that is not already covered by the grants
+      above, so no additional permissions are required for MANL coverage.
+      Re-verify this statement whenever new MANL (or Automated) checks are
+      added.
+
     Required PowerShell Modules:
       Az.Accounts, Az.Resources, Az.Security, Az.Network, Az.Monitor,
       Az.KeyVault, Az.Storage, Az.Websites, Az.ApplicationInsights, Az.Compute,
