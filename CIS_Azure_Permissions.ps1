@@ -482,15 +482,32 @@ Write-Host ""
 Write-Host "  Configuration saved to: $OutputPath" -ForegroundColor Gray
 Write-Host ""
 
-if (-not $NoPause -and $AppId -and $AppId -ne "SKIPPED" -and $clientSecret) {
+if (-not $NoPause -and $AppId -and $AppId -ne "SKIPPED") {
     $runNow = Read-Host '  Run benchmark now? [Y/N]'
     if ($runNow -match '^[Yy]') {
-        $benchmarkPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'CIS_Azure_Benchmark_Full.ps1'
-        if (Test-Path $benchmarkPath) {
-            & $benchmarkPath -TenantId $TenantId -SubscriptionId $SubscriptionId -ClientId $AppId -ClientSecret $clientSecret
+        $secretForRun = $clientSecret
+        if (-not $secretForRun) {
+            Write-Host ""
+            Write-Host "  No client secret was created this run (use -CreateSecret to mint one)." -ForegroundColor DarkYellow
+            Write-Host "  Paste an existing client secret for app $AppId to run the benchmark now," -ForegroundColor DarkYellow
+            Write-Host "  or press Enter to skip." -ForegroundColor DarkYellow
+            $secureSecret = Read-Host '  ClientSecret' -AsSecureString
+            if ($secureSecret.Length -gt 0) {
+                $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
+                try { $secretForRun = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
+                finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+            }
+        }
+        if (-not $secretForRun) {
+            Write-Warn "No client secret provided -- benchmark run skipped."
         } else {
-            Write-Warn "Script not found: $benchmarkPath"
-            Write-Detail "Make sure both scripts are in the same directory."
+            $benchmarkPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'CIS_Azure_Benchmark_Full.ps1'
+            if (Test-Path $benchmarkPath) {
+                & $benchmarkPath -TenantId $TenantId -SubscriptionId $SubscriptionId -ClientId $AppId -ClientSecret $secretForRun
+            } else {
+                Write-Warn "Script not found: $benchmarkPath"
+                Write-Detail "Make sure both scripts are in the same directory."
+            }
         }
     }
 }

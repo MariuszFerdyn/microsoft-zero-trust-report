@@ -110,6 +110,33 @@ be safely re-runnable by operators. When modifying them:
   `try { } catch { }` around idempotent operations.
 - Keep the verification table at the bottom in sync with the grants above.
 
+### 8. Permissions scripts must offer to run the benchmark at the end
+
+At the end of every successful run, both `CIS_M365_Permissions.ps1` and
+`CIS_Azure_Permissions.ps1` must:
+
+- print the exact `CIS_*_Benchmark_Full.ps1` invocation (tenant, app,
+  subscription, secret placeholder, any optional flags) so the operator
+  can copy-paste it later;
+- then, unless `-NoPause` was passed, prompt **`Run benchmark now? [Y/N]`**
+  and, on `Y`, invoke the matching benchmark script in-process with the
+  parameters that were just configured.
+
+Handle the no-secret path explicitly. When the operator did not pass
+`-CreateSecret`, there is no secret in memory. In that case the prompt
+must still be offered; if the operator chooses `Y`, ask for the existing
+secret via `Read-Host -AsSecureString` (never echo it, never persist it
+to `CIS_*_Permissions_Output.json`), convert it with
+`Marshal.SecureStringToBSTR` / `PtrToStringAuto`, and pass the plain
+value only as an in-process argument to the benchmark script. If the
+operator presses Enter without supplying a secret, print a single
+`Write-Warn 'No client secret provided -- benchmark run skipped.'` and
+exit cleanly.
+
+Do not pass placeholder text (for example `YOUR-CLIENT-SECRET` or
+`<NOT_CREATED - re-run with -CreateSecret>`) to the benchmark script --
+guard against it.
+
 ## Coding conventions
 
 - PowerShell 5.1 compatible; use `#Requires -Version 5.1`.

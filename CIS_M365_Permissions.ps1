@@ -1078,20 +1078,37 @@ Write-Host ''
 if (-not $NoPause) {
   $runNow = Read-Host '  Run benchmark now? [Y/N]'
   if ($runNow -match '^[Yy]') {
-    $benchmarkPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'CIS_M365_Benchmark_Full.ps1'
-    if (Test-Path $benchmarkPath) {
-      $benchmarkArgs = @{
-        TenantId           = $TenantId
-        AppId              = $AppId
-        AppSecret          = $secretDisplay
-        TenantDomain       = $domain
-        SharePointAdminUrl = $spoUrl
+    $secretForRun = $secret
+    if (-not $secretForRun) {
+      Write-Host ''
+      Write-Host '  No client secret was created this run (use -CreateSecret to mint one).' -ForegroundColor DarkYellow
+      Write-Host "  Paste an existing client secret for app $AppId to run the benchmark now," -ForegroundColor DarkYellow
+      Write-Host '  or press Enter to skip.' -ForegroundColor DarkYellow
+      $secureSecret = Read-Host '  AppSecret' -AsSecureString
+      if ($secureSecret.Length -gt 0) {
+        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
+        try { $secretForRun = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
+        finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
       }
-      if (-not $IncludeExchange) { $benchmarkArgs['GraphOnlyMode'] = $true }
-      & $benchmarkPath @benchmarkArgs
+    }
+    if (-not $secretForRun) {
+      Write-Warn 'No client secret provided -- benchmark run skipped.'
     } else {
-      Write-Warn "Script not found: $benchmarkPath"
-      Write-Info 'Make sure both scripts are in the same directory.'
+      $benchmarkPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'CIS_M365_Benchmark_Full.ps1'
+      if (Test-Path $benchmarkPath) {
+        $benchmarkArgs = @{
+          TenantId           = $TenantId
+          AppId              = $AppId
+          AppSecret          = $secretForRun
+          TenantDomain       = $domain
+          SharePointAdminUrl = $spoUrl
+        }
+        if (-not $IncludeExchange) { $benchmarkArgs['GraphOnlyMode'] = $true }
+        & $benchmarkPath @benchmarkArgs
+      } else {
+        Write-Warn "Script not found: $benchmarkPath"
+        Write-Info 'Make sure both scripts are in the same directory.'
+      }
     }
   }
 }
