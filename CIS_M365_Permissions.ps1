@@ -62,6 +62,12 @@ param(
   [string]$AppId,
 
   [Parameter(Mandatory = $false)]
+  [switch]$CreateSecret,
+
+  [Parameter(Mandatory = $false)]
+  # Retained for backward compatibility. Secret creation is now opt-in via
+  # -CreateSecret, so this switch has no effect and will be removed in a
+  # future release.
   [switch]$NoSecret,
 
   [Parameter(Mandatory = $false)]
@@ -189,7 +195,13 @@ function Invoke-Az {
   $prevEap = $ErrorActionPreference
   try {
     $ErrorActionPreference = 'Continue'
-    $output = & az @AzArgs 2>&1
+    $azArgsWithFlag = $AzArgs
+    if (($AzArgs -notcontains '--only-show-errors') -and
+        ($AzArgs -notcontains '--verbose') -and
+        ($AzArgs -notcontains '--debug')) {
+      $azArgsWithFlag = @($AzArgs) + '--only-show-errors'
+    }
+    $output = & az @azArgsWithFlag 2>&1
   } finally {
     $ErrorActionPreference = $prevEap
   }
@@ -438,8 +450,9 @@ Write-Ok "ObjectId (SP): $spObjId"
 Wait-Step
 
 Write-Section "Create client secret (optional)"
+# Secret creation is opt-in via -CreateSecret so re-runs stay idempotent.
 $secret = $null
-if (-not $NoSecret) {
+if ($CreateSecret) {
   $secret = Invoke-Az -AzArgs @(
     "ad","app","credential","reset",
     "--id", $AppId,

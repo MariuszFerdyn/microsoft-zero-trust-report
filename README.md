@@ -140,6 +140,8 @@ Run the helper to create an App Registration with all required Graph, Exchange, 
 Options:
 - `-AppName "CIS-M365-Benchmark-Audit"` — custom app registration name
 - `-AppId "<existing-app-guid>"` — reuse an existing app registration
+- `-CreateSecret` — create a new client secret (opt-in; re-runs without this
+  switch stay idempotent and do not mint a new secret)
 - `-IncludeExchange` — add Exchange.ManageAsApp permission
 - `-SkipDirectoryRoles` — skip Entra directory role assignments
 - `-AutoLogin` — auto-login if Azure CLI is signed into a different tenant

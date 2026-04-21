@@ -64,6 +64,12 @@ param(
     [string]$AppId,
 
     [Parameter(Mandatory = $false)]
+    [switch]$CreateSecret,
+
+    [Parameter(Mandatory = $false)]
+    # Retained for backward compatibility. Secret creation is now opt-in via
+    # -CreateSecret, so this switch has no effect and will be removed in a
+    # future release.
     [switch]$NoSecret,
 
     [Parameter(Mandatory = $false)]
@@ -128,18 +134,54 @@ function Repair-AzLogin([string]$ExpectedTenantId) {
 
 function Invoke-Az {
     param([string[]]$Arguments, [switch]$AllowFailure)
-    $raw = & az @Arguments 2>&1
+    # Suppress az WARNING lines (e.g. the credentials-warning emitted by
+    # 'ad app credential reset') at the source. A few az subcommands reject
+    # the flag, so only append it when the caller has not supplied a
+    # conflicting verbosity switch.
+    if (($Arguments -notcontains '--only-show-errors') -and
+        ($Arguments -notcontains '--verbose') -and
+        ($Arguments -notcontains '--debug')) {
+        $Arguments = @($Arguments) + '--only-show-errors'
+    }
+    # Azure CLI writes warnings to stderr even on success; with
+    # $ErrorActionPreference = 'Stop' Windows PowerShell 5.1 would render that
+    # stderr as a red NativeCommandError. Switch EAP to 'Continue' for the
+    # native call and use $LASTEXITCODE for failure detection.
+    $prevEap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $raw = & az @Arguments 2>&1
+    } finally { $ErrorActionPreference = $prevEap }
     $code = $LASTEXITCODE
-    $stderr = ($raw | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }) -join "`n"
-    $stdout = ($raw | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
+    $stderr = (
+        $raw |
+            Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
+            ForEach-Object { $_.Exception.Message }
+    ) -join "`n"
+    $stdout = (
+        $raw |
+            Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } |
+            ForEach-Object { [string]$_ }
+    ) -join "`n"
 
     if ($code -ne 0) {
         if (Test-AzAuthError $stderr) {
             Repair-AzLogin $TenantId
-            $raw = & az @Arguments 2>&1
+            try {
+                $ErrorActionPreference = 'Continue'
+                $raw = & az @Arguments 2>&1
+            } finally { $ErrorActionPreference = $prevEap }
             $code = $LASTEXITCODE
-            $stderr = ($raw | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }) -join "`n"
-            $stdout = ($raw | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
+            $stderr = (
+                $raw |
+                    Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
+                    ForEach-Object { $_.Exception.Message }
+            ) -join "`n"
+            $stdout = (
+                $raw |
+                    Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } |
+                    ForEach-Object { [string]$_ }
+            ) -join "`n"
         }
         if ($code -ne 0 -and -not $AllowFailure) {
             throw "az $($Arguments -join ' ') failed (exit $code): $stderr"
@@ -231,9 +273,10 @@ if ($SkipGraphPermissions) {
     }
     $spObjectId = $sp.id
 
-    # Create client secret
+    # Create client secret (opt-in; -CreateSecret). Re-running without the
+    # switch does not mint a new secret, so the script stays idempotent.
     $clientSecret = $null
-    if (-not $NoSecret) {
+    if ($CreateSecret) {
         Write-Detail "Creating client secret (valid for $SecretYears year(s))..."
         $endDate = (Get-Date).AddYears($SecretYears).ToString("yyyy-MM-ddTHH:mm:ssZ")
         $secretResult = Invoke-AzJson -Arguments @(
@@ -423,7 +466,7 @@ Write-Host "  To run the CIS Azure Foundations Benchmark:" -ForegroundColor Whit
 Write-Host ""
 
 if ($AppId -and $AppId -ne "SKIPPED") {
-    $secretDisplay = if ($clientSecret) { $clientSecret } else { "<NOT_CREATED - re-run without -NoSecret>" }
+    $secretDisplay = if ($clientSecret) { $clientSecret } else { "<NOT_CREATED - re-run with -CreateSecret>" }
     Write-Host "    .\CIS_Azure_Benchmark_Full.ps1 ``" -ForegroundColor Yellow
     Write-Host "        -TenantId `"$TenantId`" ``" -ForegroundColor Yellow
     Write-Host "        -SubscriptionId `"$SubscriptionId`" ``" -ForegroundColor Yellow
