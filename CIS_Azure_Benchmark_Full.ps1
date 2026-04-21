@@ -40,6 +40,15 @@ param(
     [string]$OutputPath     = "$PSScriptRoot\CIS_Azure_Results_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 )
 
+# Suppress Az / Az.KeyVault upcoming-breaking-change warnings (noise only).
+# See: Set-AzConfig -DisplayBreakingChangeWarning / env var fallback.
+$Env:SuppressAzurePowerShellBreakingChangeWarnings = 'true'
+try {
+    if (Get-Command Set-AzConfig -ErrorAction SilentlyContinue) {
+        Set-AzConfig -DisplayBreakingChangeWarning $false -Scope Process -WarningAction SilentlyContinue | Out-Null
+    }
+} catch { }
+
 # ===============================================================================
 #  RESULT TRACKING
 # ===============================================================================
