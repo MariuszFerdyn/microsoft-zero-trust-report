@@ -69,6 +69,10 @@ $Script:GraphConnected = $false
 $Script:BapConnected   = $false
 $Script:Environments   = @()
 $Script:TenantSettings = $null
+# Cache of Dataverse tokens per environment instance URL
+$Script:DataverseTokens = @{}
+# Cache of Dataverse readiness per env (so we don't print "App User not registered" once per check)
+$Script:DataverseStatus = @{}
 
 # ===============================================================================
 #  HELPERS
@@ -229,12 +233,14 @@ function Invoke-BapApi {
     return Invoke-RestMethod @params
 }
 
-# Helper: enumerate environments once and cache the result
+# Helper: enumerate environments once and cache the result.
+# api-version=2022-05-01 includes linkedEnvironmentMetadata (instanceApiUrl,
+# securityGroupId) which we need for Dataverse calls.
 function Get-AllEnvironments {
     if ($Script:Environments -and $Script:Environments.Count -gt 0) { return $Script:Environments }
     if (-not $Script:BapConnected) { return @() }
     try {
-        $url = "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments?api-version=2020-10-01"
+        $url = "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments?api-version=2022-05-01&`$expand=properties/billingPolicy,properties/copilotPolicies"
         $resp = Invoke-BapApi -Url $url
         $Script:Environments = @($resp.value)
         return $Script:Environments
@@ -242,6 +248,74 @@ function Get-AllEnvironments {
         Write-Info "  Could not enumerate environments: $($_.Exception.Message.Split([char]10)[0])"
         $Script:Environments = @()
         return @()
+    }
+}
+
+# Helper: extract per-environment instance URL (https://orgxxx.crm.dynamics.com)
+function Get-EnvInstanceUrl {
+    param([object]$Env)
+    try {
+        if ($Env.properties.linkedEnvironmentMetadata.instanceApiUrl) {
+            return ($Env.properties.linkedEnvironmentMetadata.instanceApiUrl -replace '/$','')
+        }
+        if ($Env.properties.linkedEnvironmentMetadata.instanceUrl) {
+            return ($Env.properties.linkedEnvironmentMetadata.instanceUrl -replace '/$','')
+        }
+    } catch { }
+    return $null
+}
+
+# Helper: acquire (and cache) a Dataverse Web API token for one environment.
+# SP must be added as an Application User in that environment (see Permissions
+# helper) - otherwise this call succeeds but subsequent /api/data/v9.2/* return 401.
+function Get-DataverseToken {
+    param([Parameter(Mandatory=$true)][string]$InstanceUrl)
+    if ($Script:DataverseTokens.ContainsKey($InstanceUrl)) { return $Script:DataverseTokens[$InstanceUrl] }
+    try {
+        $tok = Get-OAuthToken -Scope "$InstanceUrl/.default"
+        $Script:DataverseTokens[$InstanceUrl] = $tok
+        return $tok
+    } catch {
+        throw "Failed to acquire Dataverse token for $InstanceUrl : $($_.Exception.Message.Split([char]10)[0])"
+    }
+}
+
+# Helper: GET a Dataverse Web API path. Returns the .value array (or the root
+# object) and writes any auth/access error inline with a helpful next step.
+# Caches the per-env readiness state ($Script:DataverseStatus).
+function Invoke-DataverseApi {
+    param(
+        [Parameter(Mandatory=$true)][string]$InstanceUrl,
+        [Parameter(Mandatory=$true)][string]$Path,
+        [string]$EnvName = $InstanceUrl
+    )
+    $url = "$InstanceUrl/api/data/v9.2/$Path"
+    try {
+        $token   = Get-DataverseToken -InstanceUrl $InstanceUrl
+        $headers = @{
+            Authorization        = "Bearer $token"
+            Accept               = "application/json"
+            'OData-Version'      = "4.0"
+            'OData-MaxVersion'   = "4.0"
+            Prefer               = 'odata.include-annotations="*"'
+        }
+        $resp = Invoke-RestMethod -Method GET -Uri $url -Headers $headers -ErrorAction Stop
+        $Script:DataverseStatus[$InstanceUrl] = 'OK'
+        return $resp
+    } catch {
+        $status = 'ERROR'
+        $msg = $_.Exception.Message
+        if ($_.Exception.Response) {
+            try { $status = [int]$_.Exception.Response.StatusCode } catch { }
+        }
+        $Script:DataverseStatus[$InstanceUrl] = $status
+        if ($status -eq 401 -or $msg -match 'Unauthorized|401') {
+            Write-Info "    [$EnvName] Dataverse 401: SP is not registered as an Application User in this environment."
+            Write-Info "    Fix once per env: Power Platform Admin Center > Environment > Settings > Users + permissions > Application users > New app user (pick app, assign 'System Administrator')."
+        } else {
+            Write-Info "    [$EnvName] Dataverse call failed ($status): $($msg.Split([char]10)[0])"
+        }
+        return $null
     }
 }
 
@@ -282,27 +356,29 @@ function Check-MANL-1_1 {
                 "https://learn.microsoft.com/power-platform/admin/control-user-access"
             )
 
-        # Diagnostic: list environments and whether they have a security group attached
+        # Automated audit: per-env securityGroupId from BAP linkedEnvironmentMetadata
         $envs = Get-AllEnvironments
         if ($envs -and $envs.Count -gt 0) {
             Write-Info "Environments enumerated via BAP API: $($envs.Count)"
             $missing = @()
+            $ok      = @()
             foreach ($e in $envs) {
-                $name      = $e.properties.displayName
-                $envType   = $e.properties.environmentSku
-                $sgObjId   = $null
-                try {
-                    if ($e.properties.PSObject.Properties.Name -contains 'securityGroupId') {
-                        $sgObjId = $e.properties.securityGroupId
-                    } elseif ($e.properties.PSObject.Properties.Name -contains 'linkedEnvironmentMetadata') {
-                        $sgObjId = $e.properties.linkedEnvironmentMetadata.securityGroupId
-                    }
-                } catch { }
-                $marker = if ($sgObjId) { "SG=$sgObjId" } else { "no security group" }
+                $name    = $e.properties.displayName
+                $envType = $e.properties.environmentSku
+                $sgId    = $null
+                try { $sgId = $e.properties.linkedEnvironmentMetadata.securityGroupId } catch { }
+                $hasSg   = $sgId -and $sgId -ne '00000000-0000-0000-0000-000000000000'
+                $marker  = if ($hasSg) { "SG=$sgId" } else { "[NO SECURITY GROUP]" }
                 Write-Info "  -> [$envType] $name :: $marker"
-                if (-not $sgObjId -and $envType -ne 'Default') { $missing += $name }
+                if ($envType -eq 'Default') { continue }   # CIS allows Default env without SG
+                if ($hasSg) { $ok += $name } else { $missing += $name }
             }
-            $detail = "Envs=$($envs.Count); without SG (excl. Default)=$($missing.Count): $($missing -join '; ')"
+            if ($missing.Count -eq 0) {
+                Write-Info "All non-Default environments have a security group attached."
+            } else {
+                Write-Info "Non-Default environments WITHOUT a security group ($($missing.Count)): $($missing -join '; ')"
+            }
+            $detail = "Envs=$($envs.Count); with SG=$($ok.Count); without SG (excl. Default)=$($missing.Count): $($missing -join '; ')"
             Write-Manl "Review each environment above against organizational policy."
             Add-Result "1.1" "User access to environments controlled with Security Groups" "MANL" $detail
         } else {
@@ -330,8 +406,43 @@ function Check-MANL-1_2 {
             -References @(
                 "https://learn.microsoft.com/power-platform/admin/user-session-management"
             )
-        Write-Manl "Session-expiration settings are per-environment Dataverse Web API (Org Settings) - verify in the admin center."
-        Add-Result "1.2" "User sessions terminated on time limit / logoff" "MANL" "Per-environment Privacy + Security settings - requires UI verification."
+
+        # Automated audit: Dataverse organization entity (session + inactivity timeout columns)
+        $envs = Get-AllEnvironments
+        $rows = @()
+        foreach ($e in $envs) {
+            $envType = $e.properties.environmentSku
+            $name    = $e.properties.displayName
+            if ($envType -notin @('Production','Sandbox','Trial')) { continue }
+            $url = Get-EnvInstanceUrl $e
+            if (-not $url) { continue }
+            $sel = 'sessiontimeoutenabled,sessiontimeoutinminutes,sessiontimeoutreminderinminutes,inactivitytimeoutenabled,inactivitytimeoutinminutes,inactivitytimeoutreminderinminutes'
+            $org = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "organizations?`$select=$sel"
+            if ($null -eq $org) { continue }
+            $o = @($org.value)[0]
+            $rows += [PSCustomObject]@{
+                Env     = $name
+                SesOn   = $o.sessiontimeoutenabled
+                SesMin  = $o.sessiontimeoutinminutes
+                IdleOn  = $o.inactivitytimeoutenabled
+                IdleMin = $o.inactivitytimeoutinminutes
+            }
+        }
+        if ($rows.Count -gt 0) {
+            $bad = @()
+            foreach ($r in $rows) {
+                $sesOk  = $r.SesOn  -eq $true -and $r.SesMin  -and $r.SesMin  -le 1440
+                $idleOk = $r.IdleOn -eq $true -and $r.IdleMin -and $r.IdleMin -le 60
+                $flag   = if ($sesOk -and $idleOk) { 'OK' } else { 'FAIL' }
+                Write-Info "  -> [$flag] $($r.Env) :: session=$($r.SesOn)/$($r.SesMin)m  inactivity=$($r.IdleOn)/$($r.IdleMin)m"
+                if (-not ($sesOk -and $idleOk)) { $bad += $r.Env }
+            }
+            $detail = "Envs queried=$($rows.Count); non-compliant=$($bad.Count): $($bad -join '; ')"
+            Add-Result "1.2" "User sessions terminated on time limit / logoff" "MANL" $detail
+        } else {
+            Add-Result "1.2" "User sessions terminated on time limit / logoff" "MANL" "Dataverse Web API unavailable (SP not registered as App User?) - manual review required."
+        }
+        Write-Manl "Verify the per-env values above against organizational policy."
     }
 }
 
@@ -538,8 +649,41 @@ function Check-MANL-2_3 {
             -References @(
                 "https://learn.microsoft.com/power-platform/admin/settings-privacy-security"
             )
-        Write-Manl "Per-environment blocked extensions list - verify in the admin center."
-        Add-Result "2.3" "Blocked file extensions match enterprise block list" "MANL" "Per-environment Privacy + Security setting - requires UI verification."
+
+        # Automated audit: read blockedattachments from organization entity per env
+        $cisDefault = @('ade','adp','app','asa','ashx','asmx','asp','bas','bat','cdx','cer','chm','class','cmd','com','config','cpl','crt','csh','dll','exe','fxp','hlp','hta','htr','htw','ida','idc','idq','inf','ins','isp','its','jar','js','jse','ksh','lnk','mad','maf','mag','mam','maq','mar','mas','mat','mau','mav','maw','mda','mdb','mde','mdt','mdw','mdz','msc','msh','msh1','msh2','mshxml','msh1xml','msh2xml','msi','msp','mst','ops','pcd','pif','plg','prf','prg','printer','pst','reg','rem','scf','scr','sct','shb','shs','shtm','shtml','soap','stm','svc','url','vb','vbe','vbs','vsmacros','vss','vst','vsw','ws','wsc','wsf','wsh')
+        $envs = Get-AllEnvironments
+        $missing = @()
+        $okEnvs  = 0
+        foreach ($e in $envs) {
+            $envType = $e.properties.environmentSku
+            $name    = $e.properties.displayName
+            if ($envType -notin @('Production','Sandbox','Trial')) { continue }
+            $url = Get-EnvInstanceUrl $e
+            if (-not $url) { continue }
+            $org = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "organizations?`$select=blockedattachments"
+            if ($null -eq $org) { continue }
+            $okEnvs++
+            $list = @($org.value)[0].blockedattachments
+            $current = @()
+            if ($list) { $current = $list.Split(';') | ForEach-Object { $_.Trim().TrimStart('.').ToLower() } | Where-Object { $_ } }
+            $absent  = @($cisDefault | Where-Object { $_ -notin $current })
+            $flag    = if ($absent.Count -eq 0) { 'OK' } else { 'PARTIAL' }
+            Write-Info "  -> [$flag] $name :: extensions=$($current.Count); missing from CIS default=$($absent.Count)"
+            if ($absent.Count -gt 0) {
+                $sample = if ($absent.Count -gt 12) { ($absent[0..11] -join ',') + ',...' } else { $absent -join ',' }
+                Write-Info "       missing: $sample"
+                $missing += "$name (-$($absent.Count))"
+            }
+        }
+        if ($okEnvs -gt 0) {
+            $detail = "Envs queried=$okEnvs; missing CIS defaults in: $($missing -join '; ')"
+            if ($missing.Count -eq 0) { $detail = "Envs queried=$okEnvs; all envs cover CIS default block list." }
+            Add-Result "2.3" "Blocked file extensions match enterprise block list" "MANL" $detail
+        } else {
+            Add-Result "2.3" "Blocked file extensions match enterprise block list" "MANL" "Dataverse Web API unavailable - manual review required."
+        }
+        Write-Manl "Verify the per-env extension list against the organizational block list."
     }
 }
 
@@ -618,19 +762,38 @@ function Check-MANL-2_5 {
             )
 
         if ($Script:BapConnected) {
-            try {
-                $url = "https://api.bap.microsoft.com/providers/PowerPlatform.Governance/v1/tenantIsolationPolicy?api-version=2020-10-01"
-                $resp = Invoke-BapApi -Url $url
+            $resp = $null
+            $tenantId = $TenantId
+            $endpoints = @(
+                "https://api.bap.microsoft.com/providers/PowerPlatform.Governance/v1/tenants/$tenantId/crossTenantAccessPolicy?api-version=2020-10-01",
+                "https://api.bap.microsoft.com/providers/PowerPlatform.Governance/v1/tenantIsolationPolicy?api-version=2020-10-01"
+            )
+            foreach ($u in $endpoints) {
+                try { $resp = Invoke-BapApi -Url $u; if ($resp) { break } } catch { }
+            }
+            if ($resp) {
                 $enabled = $null
                 try { $enabled = $resp.properties.isDisabled -eq $false } catch { }
-                $allow = $null
+                if ($null -eq $enabled) {
+                    try { $enabled = [bool]$resp.properties.tenantIsolation.isEnabled } catch { }
+                }
+                $allow = @()
                 try { $allow = @($resp.properties.allowedTenants) } catch { }
+                if (-not $allow) { try { $allow = @($resp.properties.tenantIsolation.allowedTenants) } catch { } }
                 Write-Info "Cross-tenant isolation enabled = $enabled"
-                if ($allow) { Write-Info "Allowed tenants ($($allow.Count)):"; foreach ($t in $allow) { Write-Info "  -> $($t.tenantId) inbound=$($t.direction.inbound) outbound=$($t.direction.outbound)" } }
+                if ($allow) {
+                    Write-Info "Allowed tenants ($($allow.Count)):"
+                    foreach ($t in $allow) {
+                        $inb = $null; $out = $null
+                        try { $inb = $t.direction.inbound }  catch { }
+                        try { $out = $t.direction.outbound } catch { }
+                        Write-Info "  -> $($t.tenantId) inbound=$inb outbound=$out"
+                    }
+                }
                 Add-Result "2.5" "Cross-tenant isolation enabled" "MANL" "Enabled=$enabled; allow-list count=$(@($allow).Count)"
                 Write-Manl "Verify the allow-list and direction in the Power Platform Admin Center."
-            } catch {
-                Write-Manl "Could not read tenant isolation policy via BAP API: $($_.Exception.Message.Split([char]10)[0])"
+            } else {
+                Write-Manl "Could not read tenant isolation policy via BAP API (tried crossTenantAccessPolicy and tenantIsolationPolicy)."
                 Add-Result "2.5" "Cross-tenant isolation enabled" "MANL" "BAP API unavailable - manual review required."
             }
         } else {
@@ -701,8 +864,41 @@ function Check-MANL-3_2 {
             -References @(
                 "https://learn.microsoft.com/power-platform/admin/create-edit-security-role"
             )
-        Write-Manl "Per-role Privacy privilege review requires Dataverse Web API per environment - verify in the admin center."
-        Add-Result "3.2" "Extract customer data privileges controlled" "MANL" "Per-environment Dataverse security role review required."
+
+        # Automated audit: list which roles per env hold any Privacy-Related privilege.
+        # Names from CIS: prvExportToExcel, prvUseMailMerge, prvPrint, prvGoOffline,
+        # prvAllowQuickCampaign, prvUseExternalReader, prvDataExport, prvPublishDuplicateDetectionRule.
+        $privacyPrivs = @(
+            'prvExportToExcel','prvUseMailMerge','prvPrint','prvGoOffline',
+            'prvAllowQuickCampaign','prvUseExternalReader','prvDataExport',
+            'prvPublishDuplicateDetectionRule'
+        )
+        $envs = Get-AllEnvironments
+        $envsOk = 0
+        foreach ($e in $envs) {
+            $envType = $e.properties.environmentSku
+            $name    = $e.properties.displayName
+            if ($envType -notin @('Production','Sandbox','Trial')) { continue }
+            $url = Get-EnvInstanceUrl $e
+            if (-not $url) { continue }
+            $filter = ($privacyPrivs | ForEach-Object { "name eq '$_'" }) -join ' or '
+            $p = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "privileges?`$select=privilegeid,name&`$filter=$filter"
+            if ($null -eq $p) { continue }
+            $envsOk++
+            $privs = @($p.value)
+            Write-Info "  -> $name :: privacy privileges resolved=$($privs.Count)"
+            foreach ($pr in $privs) {
+                $assoc = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "roleprivileges?`$select=roleid&`$filter=privilegeid eq $($pr.privilegeid)"
+                $cnt = if ($assoc) { @($assoc.value).Count } else { 0 }
+                Write-Info "       $($pr.name) granted on $cnt role(s)"
+            }
+        }
+        if ($envsOk -gt 0) {
+            Add-Result "3.2" "Extract customer data privileges controlled" "MANL" "Envs queried=$envsOk; review per-role privacy privilege counts above."
+        } else {
+            Add-Result "3.2" "Extract customer data privileges controlled" "MANL" "Dataverse Web API unavailable - manual review required."
+        }
+        Write-Manl "Privacy-related privileges should be granted only to roles that strictly need them."
     }
 }
 
@@ -723,8 +919,42 @@ function Check-MANL-3_3 {
             -References @(
                 "https://learn.microsoft.com/dynamics365/outlook-addin/user-guide/set-option-automatically-track-incoming-outlook-email"
             )
-        Write-Manl "Per-queue Dataverse setting - verify in the admin center."
-        Add-Result "3.3" "Public-queue incoming email actions restricted" "MANL" "Per-environment per-queue Dataverse setting - requires UI verification."
+
+        # Automated audit: enumerate queues and inspect incomingemaildeliverymethod
+        # OptionSet values: 0 None, 1 ServerSide, 2 MicrosoftDynamics365ForOutlook,
+        # 3 EmailRouter, 4 ForwardMailbox. CIS-aligned values are 0 or 4.
+        $methodMap = @{ 0='None'; 1='ServerSideSync'; 2='OutlookAddin'; 3='EmailRouter'; 4='ForwardMailbox' }
+        $envs = Get-AllEnvironments
+        $bad = @()
+        $okEnvs = 0
+        foreach ($e in $envs) {
+            $envType = $e.properties.environmentSku
+            $name    = $e.properties.displayName
+            if ($envType -notin @('Production','Sandbox','Trial')) { continue }
+            $url = Get-EnvInstanceUrl $e
+            if (-not $url) { continue }
+            $q = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "queues?`$select=name,emailaddress,incomingemaildeliverymethod,queueviewtype&`$filter=queueviewtype eq 0"
+            if ($null -eq $q) { continue }
+            $okEnvs++
+            $queues = @($q.value)
+            Write-Info "  -> $name :: public queues=$($queues.Count)"
+            foreach ($qu in $queues) {
+                $m  = [int]$qu.incomingemaildeliverymethod
+                $mn = if ($methodMap.ContainsKey($m)) { $methodMap[$m] } else { "Code$m" }
+                $compliant = $m -in @(0,4)
+                $flag = if ($compliant) { 'OK' } else { 'FLAG' }
+                Write-Info "       [$flag] $($qu.name) <$($qu.emailaddress)> method=$mn"
+                if (-not $compliant) { $bad += "$name/$($qu.name)=$mn" }
+            }
+        }
+        if ($okEnvs -gt 0) {
+            $detail = if ($bad.Count -eq 0) { "Envs queried=$okEnvs; no public queues with ServerSide/Outlook/EmailRouter delivery." }
+                      else { "Envs queried=$okEnvs; non-compliant public queues=$($bad.Count): $($bad -join '; ')" }
+            Add-Result "3.3" "Public-queue incoming email actions restricted" "MANL" $detail
+        } else {
+            Add-Result "3.3" "Public-queue incoming email actions restricted" "MANL" "Dataverse Web API unavailable - manual review required."
+        }
+        Write-Manl "CIS-compliant incoming methods are 'None' (0) or 'Forward Mailbox' (4)."
     }
 }
 
@@ -749,7 +979,7 @@ function Check-MANL-3_4 {
 
         if ($Script:BapConnected) {
             try {
-                $url = "https://api.bap.microsoft.com/providers/PowerPlatform.Governance/v2/policies?api-version=2018-01-01"
+                $url = "https://api.bap.microsoft.com/providers/PowerPlatform.Governance/v2/policies?api-version=2020-10-01"
                 $resp = Invoke-BapApi -Url $url
                 $policies = @($resp.value)
                 Write-Info "DLP policies via BAP API: $($policies.Count)"
@@ -798,18 +1028,46 @@ function Check-MANL-4_1 {
                 "https://learn.microsoft.com/power-platform/admin/security-roles-privileges"
             )
 
+        # Automated audit: per env, find System Administrator role and enumerate
+        # assigned systemusers (excluding disabled / application users).
         $envs = Get-AllEnvironments
-        if ($envs -and $envs.Count -gt 0) {
-            Write-Info "Reviewing System Administrator membership is per-environment via Dataverse Web API."
-            Write-Info "Environments in scope: $($envs.Count)"
-            foreach ($e in $envs) {
-                Write-Info "  -> [$($e.properties.environmentSku)] $($e.properties.displayName)"
+        $totalAdmins = 0
+        $envsOk = 0
+        foreach ($e in $envs) {
+            $envType = $e.properties.environmentSku
+            $name    = $e.properties.displayName
+            if ($envType -notin @('Production','Sandbox','Trial')) { continue }
+            $url = Get-EnvInstanceUrl $e
+            if (-not $url) { continue }
+            $r = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "roles?`$select=roleid,name&`$filter=name eq 'System Administrator'"
+            if ($null -eq $r) { continue }
+            $envsOk++
+            $roles = @($r.value)
+            if ($roles.Count -eq 0) { Write-Info "  -> $name :: System Administrator role not found"; continue }
+            $admins = @()
+            foreach ($role in $roles) {
+                $rid = $role.roleid
+                $users = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "systemuserroles?`$select=systemuserid,roleid&`$filter=roleid eq $rid"
+                if ($null -eq $users) { continue }
+                foreach ($u in @($users.value)) {
+                    $uid = $u.systemuserid
+                    $user = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "systemusers($uid)?`$select=fullname,domainname,isdisabled,applicationid"
+                    if ($null -eq $user) { continue }
+                    if ($user.isdisabled) { continue }
+                    $kind = if ($user.applicationid) { 'app' } else { 'user' }
+                    $admins += "$($user.fullname) <$($user.domainname)> [$kind]"
+                }
             }
-            Add-Result "4.1" "System Administrator role changes reviewed" "MANL" "Envs=$($envs.Count) - review System Administrator role per environment."
-        } else {
-            Add-Result "4.1" "System Administrator role changes reviewed" "MANL" "BAP API unavailable - manual review required."
+            $totalAdmins += $admins.Count
+            Write-Info "  -> $name :: System Administrator members=$($admins.Count)"
+            foreach ($a in $admins) { Write-Info "       $a" }
         }
-        Write-Manl "Per-environment Dataverse role membership - verify in the admin center."
+        if ($envsOk -gt 0) {
+            Add-Result "4.1" "System Administrator role changes reviewed" "MANL" "Envs queried=$envsOk; total admin assignments=$totalAdmins"
+        } else {
+            Add-Result "4.1" "System Administrator role changes reviewed" "MANL" "Dataverse Web API unavailable - manual review required."
+        }
+        Write-Manl "Review the per-env System Administrator membership above and remove unauthorized users."
     }
 }
 
@@ -833,25 +1091,38 @@ function Check-MANL-4_2 {
                 "https://learn.microsoft.com/power-platform/admin/logging-powerapps"
             )
 
+        # Automated audit: org entity audit flags
         $envs = Get-AllEnvironments
-        if ($envs -and $envs.Count -gt 0) {
-            $noAudit = @()
-            foreach ($e in $envs) {
-                $name = $e.properties.displayName
-                $sku  = $e.properties.environmentSku
-                $auditEnabled = $null
-                try { $auditEnabled = $e.properties.linkedEnvironmentMetadata.isAuditEnabled } catch { }
-                Write-Info "  -> [$sku] $name :: isAuditEnabled=$auditEnabled"
-                if ($sku -in @('Production','Sandbox') -and ($auditEnabled -eq $false -or $null -eq $auditEnabled)) {
-                    $noAudit += $name
-                }
-            }
-            $detail = "Envs=$($envs.Count); Production/Sandbox without confirmed audit=$($noAudit.Count): $($noAudit -join '; ')"
+        $bad = @()
+        $okEnvs = 0
+        foreach ($e in $envs) {
+            $envType = $e.properties.environmentSku
+            $name    = $e.properties.displayName
+            if ($envType -notin @('Production','Sandbox','Trial')) { continue }
+            $url = Get-EnvInstanceUrl $e
+            if (-not $url) { continue }
+            $sel = 'isauditenabled,isuseraccessauditenabled,isreadauditenabled,auditretentionperiodv2'
+            $org = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "organizations?`$select=$sel"
+            if ($null -eq $org) { continue }
+            $okEnvs++
+            $o = @($org.value)[0]
+            $au  = [bool]$o.isauditenabled
+            $ua  = [bool]$o.isuseraccessauditenabled
+            $ra  = [bool]$o.isreadauditenabled
+            $ret = $o.auditretentionperiodv2
+            $compliant = $au -and $ua -and $ra
+            $flag = if ($compliant) { 'OK' } else { 'FAIL' }
+            Write-Info "  -> [$flag] $name :: Start=$au LogAccess=$ua ReadLogs=$ra Retention=$ret days"
+            if (-not $compliant) { $bad += "$name(Start=$au,LogAccess=$ua,ReadLogs=$ra)" }
+        }
+        if ($okEnvs -gt 0) {
+            $detail = if ($bad.Count -eq 0) { "Envs queried=$okEnvs; auditing fully enabled in all." }
+                      else { "Envs queried=$okEnvs; non-compliant=$($bad.Count): $($bad -join '; ')" }
             Add-Result "4.2" "Environment Activity logging enabled" "MANL" $detail
         } else {
-            Add-Result "4.2" "Environment Activity logging enabled" "MANL" "BAP API unavailable - manual review required."
+            Add-Result "4.2" "Environment Activity logging enabled" "MANL" "Dataverse Web API unavailable - manual review required."
         }
-        Write-Manl "Per-environment auditing setting - verify in the admin center."
+        Write-Manl "All three audit flags (Start, Log Access, Read Logs) must be enabled per CIS."
     }
 }
 

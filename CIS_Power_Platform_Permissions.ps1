@@ -512,6 +512,35 @@ if (-not $registeredOk) {
 }
 
 # ---------------------------------------------------------------------------
+#  Per-environment Dataverse Application User registration (REQUIRED for
+#  the Dataverse-driven enrichment of items 1.2, 2.3, 3.2, 3.3, 4.1, 4.2)
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "----- PER-ENVIRONMENT APPLICATION USER (Dataverse) ----------------" -ForegroundColor Yellow
+Write-Host "  Several CIS items audit settings stored INSIDE each Dataverse environment" -ForegroundColor Yellow
+Write-Host "  (session timeouts, blocked attachments, public queues, security roles," -ForegroundColor Yellow
+Write-Host "  audit flags, privacy privileges). The Power Platform Administrator role" -ForegroundColor Yellow
+Write-Host "  does NOT grant access to Dataverse data plane - the service principal" -ForegroundColor Yellow
+Write-Host "  must additionally be registered as an Application User in EACH" -ForegroundColor Yellow
+Write-Host "  environment, with the System Administrator security role." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  For every environment you want covered:" -ForegroundColor Cyan
+Write-Host "    1. Power Platform Admin Center > Environments > select environment" -ForegroundColor Cyan
+Write-Host "    2. Settings > Users + permissions > Application users" -ForegroundColor Cyan
+Write-Host "    3. + New app user > Add an app > select '$AppName' ($AppId)" -ForegroundColor Cyan
+Write-Host "    4. Pick the appropriate Business unit > Create" -ForegroundColor Cyan
+Write-Host "    5. Open the new app user > Manage Roles > select System Administrator > Save" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Reference:" -ForegroundColor DarkYellow
+Write-Host "    https://learn.microsoft.com/power-platform/admin/manage-application-users" -ForegroundColor DarkYellow
+Write-Host ""
+Write-Host "  Without this step, Dataverse-backed MANL checks will print '401 Unauthorized'" -ForegroundColor DarkYellow
+Write-Host "  and fall back to CIS guidance only." -ForegroundColor DarkYellow
+Write-Host ""
+Wait-ManualStep
+
+
+# ---------------------------------------------------------------------------
 #  Resolve display values for the benchmark run command
 # ---------------------------------------------------------------------------
 $orgDomains = @()
