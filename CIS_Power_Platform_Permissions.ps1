@@ -525,14 +525,33 @@ Write-Host "  must additionally be registered as an Application User in EACH" -F
 Write-Host "  environment, with the System Administrator security role." -ForegroundColor Yellow
 Write-Host ""
 Write-Host "  For every environment you want covered:" -ForegroundColor Cyan
-Write-Host "    1. Power Platform Admin Center > Environments > select environment" -ForegroundColor Cyan
+Write-Host "    1. Open the environment list:" -ForegroundColor Cyan
+Write-Host "         https://admin.powerplatform.microsoft.com/manage/environments/" -ForegroundColor Cyan
+Write-Host "       then click the target environment." -ForegroundColor Cyan
 Write-Host "    2. Settings > Users + permissions > Application users" -ForegroundColor Cyan
 Write-Host "    3. + New app user > Add an app > select '$AppName' ($AppId)" -ForegroundColor Cyan
 Write-Host "    4. Pick the appropriate Business unit > Create" -ForegroundColor Cyan
 Write-Host "    5. Open the new app user > Manage Roles > select System Administrator > Save" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  Reference:" -ForegroundColor DarkYellow
+Write-Host "  If step 2 shows: 'We couldn''t be able to fetch app users' / 403" -ForegroundColor DarkYellow
+Write-Host "  with 'missing prvReadApplicationUser privilege', the account you are" -ForegroundColor DarkYellow
+Write-Host "  signed into the Admin Center with is a Power Platform / Global Admin in" -ForegroundColor DarkYellow
+Write-Host "  Entra ID but does NOT yet have a Dataverse security role in this env." -ForegroundColor DarkYellow
+Write-Host "  Fix it once per environment:" -ForegroundColor DarkYellow
+Write-Host "    a) Open the env > Settings > Users + permissions > Users" -ForegroundColor DarkYellow
+Write-Host "       (URL: https://admin.powerplatform.microsoft.com/manage/environments/<envId>/users)" -ForegroundColor DarkYellow
+Write-Host "    b) Find your own account (Add user if missing) > Manage security roles" -ForegroundColor DarkYellow
+Write-Host "    c) Grant 'System Administrator' (or at minimum 'System Customizer'" -ForegroundColor DarkYellow
+Write-Host "       plus a custom role that includes prvReadApplicationUser /" -ForegroundColor DarkYellow
+Write-Host "       prvCreateApplicationUser / prvWriteApplicationUser) > Save" -ForegroundColor DarkYellow
+Write-Host "    d) Sign out and back in, then return to the Application users page." -ForegroundColor DarkYellow
+Write-Host "  Note: in newer (Sandbox/Trial) envs you may also need to enable the env" -ForegroundColor DarkYellow
+Write-Host "  for your account via PIM activation of the 'Dynamics 365 Administrator'" -ForegroundColor DarkYellow
+Write-Host "  role, since Power Platform Admin alone does not auto-provision in every env." -ForegroundColor DarkYellow
+Write-Host ""
+Write-Host "  References:" -ForegroundColor DarkYellow
 Write-Host "    https://learn.microsoft.com/power-platform/admin/manage-application-users" -ForegroundColor DarkYellow
+Write-Host "    https://learn.microsoft.com/power-platform/admin/security-roles-privileges" -ForegroundColor DarkYellow
 Write-Host ""
 Write-Host "  Without this step, Dataverse-backed MANL checks will print '401 Unauthorized'" -ForegroundColor DarkYellow
 Write-Host "  and fall back to CIS guidance only." -ForegroundColor DarkYellow

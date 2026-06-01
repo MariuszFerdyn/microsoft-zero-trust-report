@@ -311,7 +311,10 @@ function Invoke-DataverseApi {
         $Script:DataverseStatus[$InstanceUrl] = $status
         if ($status -eq 401 -or $msg -match 'Unauthorized|401') {
             Write-Info "    [$EnvName] Dataverse 401: SP is not registered as an Application User in this environment."
-            Write-Info "    Fix once per env: Power Platform Admin Center > Environment > Settings > Users + permissions > Application users > New app user (pick app, assign 'System Administrator')."
+            Write-Info "    Fix once per env: https://admin.powerplatform.microsoft.com/manage/environments/ > env > Settings > Users + permissions > Application users > New app user (assign 'System Administrator')."
+        } elseif ($status -eq 403 -or $msg -match 'Forbidden|403|prv[A-Z]') {
+            Write-Info "    [$EnvName] Dataverse 403: SP is registered but missing a privilege ($($msg -replace '.*missing (prv\w+).*','$1'))."
+            Write-Info "    Fix: open the app user > Manage Roles > assign 'System Administrator' (or a role that includes the missing prv*)."
         } else {
             Write-Info "    [$EnvName] Dataverse call failed ($status): $($msg.Split([char]10)[0])"
         }
