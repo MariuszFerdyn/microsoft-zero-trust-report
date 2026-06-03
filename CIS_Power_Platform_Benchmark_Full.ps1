@@ -112,10 +112,26 @@ function Write-Info { param([string]$M); Write-Host "    $M"       -ForegroundCo
 function Write-Skip { param([string]$M); Write-Host "  [SKIP] $M" -ForegroundColor DarkGray }
 
 function Add-Result {
-    param([string]$Section, [string]$Title, [string]$Status, [string]$Detail)
+    param([string]$Section, [string]$Title, [string]$Status, [string]$Detail, [string]$AutoVerdict)
+    if ($AutoVerdict -and $Detail -notmatch '^\[AUTO:') {
+        $Detail = "[AUTO: $AutoVerdict] $Detail"
+    }
     $Script:Results.Add([PSCustomObject]@{
         Section = $Section; Title = $Title; Status = $Status; Detail = $Detail
     })
+}
+
+# Convenience wrapper for MANL items: pass the automated verdict (PASS, FAIL,
+# WARN, NA, UNKNOWN) and a short evidence string. Status remains MANL per CIS,
+# but the Detail column now carries the auto-verdict so the summary can show
+# real PASS/FAIL signal in addition to the MANL flag.
+function Add-MANL {
+    param(
+        [string]$Section, [string]$Title,
+        [ValidateSet('PASS','FAIL','WARN','NA','UNKNOWN')][string]$Verdict,
+        [string]$Evidence
+    )
+    Add-Result -Section $Section -Title $Title -Status 'MANL' -Detail $Evidence -AutoVerdict $Verdict
 }
 
 function Invoke-Check {
@@ -245,21 +261,33 @@ function Invoke-BapApi {
 }
 
 # Helper: enumerate environments once and cache the result.
-# api-version=2022-05-01 includes linkedEnvironmentMetadata (instanceApiUrl,
-# securityGroupId) which we need for Dataverse calls.
+# Tries multiple api-versions; older versions are tolerated by tenants where the
+# SP isn't yet registered for newer schemas. Drops $expand options that can
+# 400/403 on tenants without the corresponding licenses.
 function Get-AllEnvironments {
     if ($Script:Environments -and $Script:Environments.Count -gt 0) { return $Script:Environments }
     if (-not $Script:BapConnected) { return @() }
-    try {
-        $url = "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments?api-version=2022-05-01&`$expand=properties/billingPolicy,properties/copilotPolicies"
-        $resp = Invoke-BapApi -Url $url
-        $Script:Environments = @($resp.value)
-        return $Script:Environments
-    } catch {
-        Write-Info "  Could not enumerate environments: $($_.Exception.Message.Split([char]10)[0])"
-        $Script:Environments = @()
-        return @()
+    $apiVersions = @('2022-05-01','2021-04-01','2020-10-01','2020-08-01-preview','2019-05-01')
+    $lastErr = $null
+    foreach ($ver in $apiVersions) {
+        try {
+            $url  = "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments?api-version=$ver"
+            $resp = Invoke-BapApi -Url $url
+            if ($resp -and $resp.value) {
+                $Script:Environments = @($resp.value)
+                if ($ver -ne $apiVersions[0]) { Write-Info "  Environments enumerated via fallback api-version=$ver." }
+                return $Script:Environments
+            }
+        } catch {
+            $lastErr = $_.Exception.Message.Split([char]10)[0]
+            continue
+        }
     }
+    Write-Info "  BAP env enumeration failed on all api-versions. Last error: $lastErr"
+    Write-Info "  Most common cause: SP not registered. Run once interactively as a PP admin:"
+    Write-Info "    Add-PowerAppsAccount; New-PowerAppManagementApp -ApplicationId <appId>"
+    $Script:Environments = @()
+    return @()
 }
 
 function Get-DataverseFallbackDetail {
@@ -432,10 +460,11 @@ function Check-MANL-1_1 {
             }
             $detail = "Envs=$($envs.Count); with SG=$($ok.Count); without SG (excl. Default)=$($missing.Count): $($missing -join '; ')"
             Write-Manl "Review each environment above against organizational policy."
-            Add-Result "1.1" "User access to environments controlled with Security Groups" "MANL" $detail
+            $verdict = if ($missing.Count -eq 0) { 'PASS' } else { 'FAIL' }
+            Add-MANL "1.1" "User access to environments controlled with Security Groups" $verdict $detail
         } else {
             Write-Manl "Could not enumerate environments via BAP API - verify in the Power Platform Admin Center."
-            Add-Result "1.1" "User access to environments controlled with Security Groups" "MANL" "BAP API unavailable - manual review required."
+            Add-MANL "1.1" "User access to environments controlled with Security Groups" 'UNKNOWN' "BAP API unavailable - manual review required."
         }
     }
 }
@@ -490,9 +519,10 @@ function Check-MANL-1_2 {
                 if (-not ($sesOk -and $idleOk)) { $bad += $r.Env }
             }
             $detail = "Envs queried=$($rows.Count); non-compliant=$($bad.Count): $($bad -join '; ')"
-            Add-Result "1.2" "User sessions terminated on time limit / logoff" "MANL" $detail
+            $verdict = if ($bad.Count -eq 0) { 'PASS' } else { 'FAIL' }
+            Add-MANL "1.2" "User sessions terminated on time limit / logoff" $verdict $detail
         } else {
-            Add-Result "1.2" "User sessions terminated on time limit / logoff" "MANL" (Get-DataverseFallbackDetail $envs.Count)
+            Add-MANL "1.2" "User sessions terminated on time limit / logoff" $(if ($envs.Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail $envs.Count)
         }
         Write-Manl "Verify the per-env values above against organizational policy."
     }
@@ -552,14 +582,14 @@ function Check-MANL-1_3 {
                 }
                 $detail = "Admins=$($members.Count); hybrid-synced=$($hybrid.Count): $(@($hybrid.UPN) -join '; ')"
                 Write-Manl "Verify each listed admin has a separate admin-only account."
-                Add-Result "1.3" "Administrative accounts separate / unassigned / cloud-only" "MANL" $detail
+                Add-MANL "1.3" "Administrative accounts separate / unassigned / cloud-only" 'UNKNOWN' $detail
             } catch {
                 Write-Manl "Could not enumerate admin accounts: $($_.Exception.Message)"
-                Add-Result "1.3" "Administrative accounts separate / unassigned / cloud-only" "MANL" "Could not query admins - manual review required."
+                Add-MANL "1.3" "Administrative accounts separate / unassigned / cloud-only" 'UNKNOWN' "Could not query admins - manual review required."
             }
         } else {
             Write-Manl "Graph not connected - verify in the M365 Admin Center."
-            Add-Result "1.3" "Administrative accounts separate / unassigned / cloud-only" "MANL" "Graph not connected - manual review required."
+            Add-MANL "1.3" "Administrative accounts separate / unassigned / cloud-only" 'UNKNOWN' "Graph not connected - manual review required."
         }
     }
 }
@@ -599,19 +629,19 @@ function Check-MANL-1_4 {
                 if ($mfaAll -and $mfaAll.Count -gt 0) {
                     Write-Info "Policies enforcing MFA for All users:"
                     foreach ($p in $mfaAll) { Write-Info "  -> $($p.displayName)" }
-                    Add-Result "1.4" "MFA for all users is enabled (CA)" "MANL" "Candidate policies: $($mfaAll.displayName -join '; ')"
+                    Add-MANL "1.4" "MFA for all users is enabled (CA)" 'PASS' "Candidate policies: $($mfaAll.displayName -join '; ')"
                 } else {
                     Write-Info "No enabled CA policy that requires MFA for All users was detected."
-                    Add-Result "1.4" "MFA for all users is enabled (CA)" "MANL" "No enabled All-users + MFA CA policy detected."
+                    Add-MANL "1.4" "MFA for all users is enabled (CA)" 'FAIL' "No enabled All-users + MFA CA policy detected."
                 }
                 Write-Manl "Verify scope (Power Platform / Dataverse cloud apps) and break-glass exclusions in the Entra portal."
             } catch {
                 Write-Manl "Could not read CA policies (need Policy.Read.All / Entra ID P1+): $($_.Exception.Message)"
-                Add-Result "1.4" "MFA for all users is enabled (CA)" "MANL" "Could not query CA policies - manual review required."
+                Add-MANL "1.4" "MFA for all users is enabled (CA)" 'UNKNOWN' "Could not query CA policies - manual review required."
             }
         } else {
             Write-Manl "Graph not connected - verify in the Entra portal."
-            Add-Result "1.4" "MFA for all users is enabled (CA)" "MANL" "Graph not connected - manual review required."
+            Add-MANL "1.4" "MFA for all users is enabled (CA)" 'UNKNOWN' "Graph not connected - manual review required."
         }
     }
 }
@@ -651,14 +681,14 @@ function Check-MANL-2_1 {
             Write-Info "disableTrialEnvironmentCreationByNonAdminUsers = $disableTrial"
             if ($disableProd -eq $true -and $disableTrial -eq $true) {
                 Write-Manl "Both flags are True - environment creation appears restricted. Verify in the admin center."
-                Add-Result "2.1" "Env creation restricted to admins" "MANL" "prod=$disableProd; trial=$disableTrial (restricted)"
+                Add-MANL "2.1" "Env creation restricted to admins" 'PASS' "prod=$disableProd; trial=$disableTrial (restricted)"
             } else {
                 Write-Manl "One or both flags are not True - environment creation may NOT be restricted."
-                Add-Result "2.1" "Env creation restricted to admins" "MANL" "prod=$disableProd; trial=$disableTrial (NOT fully restricted)"
+                Add-MANL "2.1" "Env creation restricted to admins" 'FAIL' "prod=$disableProd; trial=$disableTrial (NOT fully restricted)"
             }
         } else {
             Write-Manl "Could not read tenant settings via BAP API - verify in the Power Platform Admin Center."
-            Add-Result "2.1" "Env creation restricted to admins" "MANL" "BAP API unavailable - manual review required."
+            Add-MANL "2.1" "Env creation restricted to admins" 'UNKNOWN' "BAP API unavailable - manual review required."
         }
     }
 }
@@ -681,7 +711,7 @@ function Check-MANL-2_2 {
                 "https://learn.microsoft.com/dynamics365/customerengagement/on-premises/developer/security-dev/how-role-based-security-control-access-entities"
             )
         Write-Manl "Per-role privilege review requires Dataverse Web API per environment - verify in the admin center."
-        Add-Result "2.2" "Security roles use minimum business-data access" "MANL" "Per-environment Dataverse security role review required."
+        Add-MANL "2.2" "Security roles use minimum business-data access" 'UNKNOWN' "Per-environment Dataverse security role review required."
     }
 }
 
@@ -731,9 +761,10 @@ function Check-MANL-2_3 {
         if ($okEnvs -gt 0) {
             $detail = "Envs queried=$okEnvs; missing CIS defaults in: $($missing -join '; ')"
             if ($missing.Count -eq 0) { $detail = "Envs queried=$okEnvs; all envs cover CIS default block list." }
-            Add-Result "2.3" "Blocked file extensions match enterprise block list" "MANL" $detail
+            $verdict = if ($missing.Count -eq 0) { 'PASS' } else { 'FAIL' }
+            Add-MANL "2.3" "Blocked file extensions match enterprise block list" $verdict $detail
         } else {
-            Add-Result "2.3" "Blocked file extensions match enterprise block list" "MANL" (Get-DataverseFallbackDetail $envs.Count)
+            Add-MANL "2.3" "Blocked file extensions match enterprise block list" $(if ($envs.Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail $envs.Count)
         }
         Write-Manl "Verify the per-env extension list against the organizational block list."
     }
@@ -777,19 +808,19 @@ function Check-MANL-2_4 {
                 if ($matches -and $matches.Count -gt 0) {
                     Write-Info "CA policies targeting Dataverse/Dynamics with a location condition:"
                     foreach ($p in $matches) { Write-Info "  -> $($p.displayName)" }
-                    Add-Result "2.4" "Access restricted by location (CA)" "MANL" "Candidate policies: $($matches.displayName -join '; ')"
+                    Add-MANL "2.4" "Access restricted by location (CA)" 'PASS' "Candidate policies: $($matches.displayName -join '; ')"
                 } else {
                     Write-Info "No enabled CA policy with Dataverse/Dynamics apps + location condition detected."
-                    Add-Result "2.4" "Access restricted by location (CA)" "MANL" "No matching CA policy detected."
+                    Add-MANL "2.4" "Access restricted by location (CA)" 'FAIL' "No matching CA policy detected."
                 }
                 Write-Manl "Verify the location list and excluded users in the Entra portal."
             } catch {
                 Write-Manl "Could not read CA policies: $($_.Exception.Message)"
-                Add-Result "2.4" "Access restricted by location (CA)" "MANL" "Could not query CA policies - manual review required."
+                Add-MANL "2.4" "Access restricted by location (CA)" 'UNKNOWN' "Could not query CA policies - manual review required."
             }
         } else {
             Write-Manl "Graph not connected - verify in the Entra portal."
-            Add-Result "2.4" "Access restricted by location (CA)" "MANL" "Graph not connected - manual review required."
+            Add-MANL "2.4" "Access restricted by location (CA)" 'UNKNOWN' "Graph not connected - manual review required."
         }
     }
 }
@@ -842,15 +873,16 @@ function Check-MANL-2_5 {
                         Write-Info "  -> $($t.tenantId) inbound=$inb outbound=$out"
                     }
                 }
-                Add-Result "2.5" "Cross-tenant isolation enabled" "MANL" "Enabled=$enabled; allow-list count=$(@($allow).Count)"
+                $verdict = if ($enabled -eq $true) { 'PASS' } elseif ($enabled -eq $false) { 'FAIL' } else { 'UNKNOWN' }
+                Add-MANL "2.5" "Cross-tenant isolation enabled" $verdict "Enabled=$enabled; allow-list count=$(@($allow).Count)"
                 Write-Manl "Verify the allow-list and direction in the Power Platform Admin Center."
             } else {
                 Write-Manl "Could not read tenant isolation policy via BAP API (tried crossTenantAccessPolicy and tenantIsolationPolicy)."
-                Add-Result "2.5" "Cross-tenant isolation enabled" "MANL" "BAP API unavailable - manual review required."
+                Add-MANL "2.5" "Cross-tenant isolation enabled" 'UNKNOWN' "BAP API unavailable - manual review required."
             }
         } else {
             Write-Manl "BAP API not connected - verify in the Power Platform Admin Center."
-            Add-Result "2.5" "Cross-tenant isolation enabled" "MANL" "BAP API not connected - manual review required."
+            Add-MANL "2.5" "Cross-tenant isolation enabled" 'UNKNOWN' "BAP API not connected - manual review required."
         }
     }
 }
@@ -891,10 +923,10 @@ function Check-MANL-3_1 {
             }
             $detail = "Envs=$($envs.Count); Production/Sandbox without explicit CMK signal=$($cmkUnknown.Count): $($cmkUnknown -join '; ')"
             Write-Manl "BAP API only exposes encryption status partially; verify CMK in the admin center."
-            Add-Result "3.1" "Critical-data environments use CMK" "MANL" $detail
+            Add-MANL "3.1" "Critical-data environments use CMK" 'UNKNOWN' $detail
         } else {
             Write-Manl "Could not enumerate environments - verify in the admin center."
-            Add-Result "3.1" "Critical-data environments use CMK" "MANL" "BAP API unavailable - manual review required."
+            Add-MANL "3.1" "Critical-data environments use CMK" 'UNKNOWN' "BAP API unavailable - manual review required."
         }
     }
 }
@@ -946,9 +978,9 @@ function Check-MANL-3_2 {
             }
         }
         if ($envsOk -gt 0) {
-            Add-Result "3.2" "Extract customer data privileges controlled" "MANL" "Envs queried=$envsOk; review per-role privacy privilege counts above."
+            Add-MANL "3.2" "Extract customer data privileges controlled" 'UNKNOWN' "Envs queried=$envsOk; review per-role privacy privilege counts above."
         } else {
-            Add-Result "3.2" "Extract customer data privileges controlled" "MANL" (Get-DataverseFallbackDetail $envs.Count)
+            Add-MANL "3.2" "Extract customer data privileges controlled" $(if ($envs.Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail $envs.Count)
         }
         Write-Manl "Privacy-related privileges should be granted only to roles that strictly need them."
     }
@@ -1002,9 +1034,10 @@ function Check-MANL-3_3 {
         if ($okEnvs -gt 0) {
             $detail = if ($bad.Count -eq 0) { "Envs queried=$okEnvs; no public queues with ServerSide/Outlook/EmailRouter delivery." }
                       else { "Envs queried=$okEnvs; non-compliant public queues=$($bad.Count): $($bad -join '; ')" }
-            Add-Result "3.3" "Public-queue incoming email actions restricted" "MANL" $detail
+            $verdict = if ($bad.Count -eq 0) { 'PASS' } else { 'FAIL' }
+            Add-MANL "3.3" "Public-queue incoming email actions restricted" $verdict $detail
         } else {
-            Add-Result "3.3" "Public-queue incoming email actions restricted" "MANL" (Get-DataverseFallbackDetail $envs.Count)
+            Add-MANL "3.3" "Public-queue incoming email actions restricted" $(if ($envs.Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail $envs.Count)
         }
         Write-Manl "CIS-compliant incoming methods are 'None' (0) or 'Forward Mailbox' (4)."
     }
@@ -1040,19 +1073,19 @@ function Check-MANL-3_4 {
                     Write-Info "  -> $($p.displayName) :: scope=$scope"
                 }
                 if ($policies.Count -gt 0) {
-                    Add-Result "3.4" "DLP policies enabled and restrict connectors" "MANL" "Policies=$($policies.Count): $($policies.displayName -join '; ')"
+                    Add-MANL "3.4" "DLP policies enabled and restrict connectors" 'PASS' "Policies=$($policies.Count): $($policies.displayName -join '; ')"
                 } else {
                     Write-Fail "No DLP policies found in the tenant."
-                    Add-Result "3.4" "DLP policies enabled and restrict connectors" "MANL" "No DLP policies found - CIS requires at least one."
+                    Add-MANL "3.4" "DLP policies enabled and restrict connectors" 'FAIL' "No DLP policies found - CIS requires at least one."
                 }
                 Write-Manl "Verify connector categorization and scope in the admin center."
             } catch {
                 Write-Manl "Could not read DLP policies via BAP API: $($_.Exception.Message.Split([char]10)[0])"
-                Add-Result "3.4" "DLP policies enabled and restrict connectors" "MANL" "BAP API unavailable - manual review required."
+                Add-MANL "3.4" "DLP policies enabled and restrict connectors" 'UNKNOWN' "BAP API unavailable - manual review required."
             }
         } else {
             Write-Manl "BAP API not connected - verify in the Power Platform Admin Center."
-            Add-Result "3.4" "DLP policies enabled and restrict connectors" "MANL" "BAP API not connected - manual review required."
+            Add-MANL "3.4" "DLP policies enabled and restrict connectors" 'UNKNOWN' "BAP API not connected - manual review required."
         }
     }
 }
@@ -1115,9 +1148,9 @@ function Check-MANL-4_1 {
             foreach ($a in $admins) { Write-Info "       $a" }
         }
         if ($envsOk -gt 0) {
-            Add-Result "4.1" "System Administrator role changes reviewed" "MANL" "Envs queried=$envsOk; total admin assignments=$totalAdmins"
+            Add-MANL "4.1" "System Administrator role changes reviewed" 'UNKNOWN' "Envs queried=$envsOk; total admin assignments=$totalAdmins"
         } else {
-            Add-Result "4.1" "System Administrator role changes reviewed" "MANL" (Get-DataverseFallbackDetail $envs.Count)
+            Add-MANL "4.1" "System Administrator role changes reviewed" $(if ($envs.Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail $envs.Count)
         }
         Write-Manl "Review the per-env System Administrator membership above and remove unauthorized users."
     }
@@ -1170,9 +1203,10 @@ function Check-MANL-4_2 {
         if ($okEnvs -gt 0) {
             $detail = if ($bad.Count -eq 0) { "Envs queried=$okEnvs; auditing fully enabled in all." }
                       else { "Envs queried=$okEnvs; non-compliant=$($bad.Count): $($bad -join '; ')" }
-            Add-Result "4.2" "Environment Activity logging enabled" "MANL" $detail
+            $verdict = if ($bad.Count -eq 0) { 'PASS' } else { 'FAIL' }
+            Add-MANL "4.2" "Environment Activity logging enabled" $verdict $detail
         } else {
-            Add-Result "4.2" "Environment Activity logging enabled" "MANL" (Get-DataverseFallbackDetail $envs.Count)
+            Add-MANL "4.2" "Environment Activity logging enabled" $(if ($envs.Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail $envs.Count)
         }
         Write-Manl "All three audit flags (Start, Log Access, Read Logs) must be enabled per CIS."
     }
@@ -1197,7 +1231,7 @@ function Check-MANL-4_3 {
                 "https://learn.microsoft.com/power-platform/guidance/adoption/sharing-alerts"
             )
         Write-Manl "Defender / Purview alert policies are not exposed via standard Graph - verify in the Compliance portal."
-        Add-Result "4.3" "App creation notification enabled" "MANL" "Requires Purview / Compliance portal verification."
+        Add-MANL "4.3" "App creation notification enabled" 'UNKNOWN' "Requires Purview / Compliance portal verification."
     }
 }
 
@@ -1206,27 +1240,37 @@ function Check-MANL-4_3 {
 # ===============================================================================
 function Show-Summary {
     $total  = $Script:PassCount + $Script:FailCount + $Script:WarnCount + $Script:ManlCount
-    $line82 = "=" * 82
+    $line92 = "=" * 92
     Write-Host ""
-    Write-Host $line82 -ForegroundColor Cyan
+    Write-Host $line92 -ForegroundColor Cyan
     Write-Host "  CIS Power Platform Foundations Benchmark v1.0.0 - RESULTS SUMMARY" -ForegroundColor Cyan
-    Write-Host $line82 -ForegroundColor Cyan
+    Write-Host $line92 -ForegroundColor Cyan
     Write-Host ""
-    Write-Host ("  {0,-12} {1,-50} {2}" -f "SECTION","TITLE","STATUS")
-    Write-Host ("  {0,-12} {1,-50} {2}" -f ("-"*12),("-"*50),("-"*6))
+    Write-Host "  Status column = CIS classification (all 16 items are Manual per CIS)." -ForegroundColor DarkGray
+    Write-Host "  AUTO column   = automated verdict from this script (PASS/FAIL/N/A/UNKNOWN)." -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host ("  {0,-8} {1,-50} {2,-6} {3}" -f "SECTION","TITLE","STATUS","AUTO")
+    Write-Host ("  {0,-8} {1,-50} {2,-6} {3}" -f ("-"*8),("-"*50),("-"*6),("-"*8))
 
+    $autoCounts = @{ PASS=0; FAIL=0; WARN=0; NA=0; UNKNOWN=0 }
     foreach ($r in $Script:Results) {
         $col = switch ($r.Status) { "PASS"{"Green"} "FAIL"{"Red"} "MANL"{"Cyan"} default{"Magenta"} }
         $t   = if ($r.Title.Length -gt 50) { $r.Title.Substring(0,47) + "..." } else { $r.Title }
-        Write-Host ("  {0,-12} {1,-50} " -f $r.Section, $t) -NoNewline
-        Write-Host $r.Status -ForegroundColor $col
+        $auto = 'UNKNOWN'
+        if ($r.Detail -match '^\[AUTO:\s*([A-Z/]+)\]') { $auto = $matches[1].Trim() }
+        if ($autoCounts.ContainsKey($auto)) { $autoCounts[$auto]++ } else { $autoCounts[$auto] = 1 }
+        $autoCol = switch ($auto) { 'PASS'{'Green'} 'FAIL'{'Red'} 'NA'{'DarkGray'} 'WARN'{'Magenta'} default{'Yellow'} }
+        Write-Host ("  {0,-8} {1,-50} " -f $r.Section, $t) -NoNewline
+        Write-Host ("{0,-6} " -f $r.Status) -ForegroundColor $col -NoNewline
+        Write-Host $auto -ForegroundColor $autoCol
         if ($r.Status -ne "PASS") {
-            Write-Host ("               $($r.Detail)") -ForegroundColor DarkGray
+            $detailNoTag = $r.Detail -replace '^\[AUTO:[^\]]+\]\s*',''
+            Write-Host ("           $detailNoTag") -ForegroundColor DarkGray
         }
     }
 
     Write-Host ""
-    Write-Host $line82 -ForegroundColor Cyan
+    Write-Host $line92 -ForegroundColor Cyan
     Write-Host ("  Checks run : {0,4}" -f $total)
     if ($total -gt 0) {
         Write-Host ("  PASS       : {0,4}  ({1:P0})" -f $Script:PassCount, ($Script:PassCount / $total)) -ForegroundColor Green
@@ -1234,7 +1278,13 @@ function Show-Summary {
         Write-Host ("  WARN       : {0,4}  ({1:P0})" -f $Script:WarnCount, ($Script:WarnCount / $total)) -ForegroundColor Magenta
         Write-Host ("  MANL       : {0,4}  ({1:P0})" -f $Script:ManlCount, ($Script:ManlCount / $total)) -ForegroundColor Cyan
     }
-    Write-Host $line82 -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Automated verdicts (within MANL items):" -ForegroundColor Yellow
+    Write-Host ("    AUTO PASS    : {0,4}" -f $autoCounts.PASS)    -ForegroundColor Green
+    Write-Host ("    AUTO FAIL    : {0,4}" -f $autoCounts.FAIL)    -ForegroundColor Red
+    Write-Host ("    AUTO N/A     : {0,4}" -f $autoCounts.NA)      -ForegroundColor DarkGray
+    Write-Host ("    AUTO UNKNOWN : {0,4}" -f $autoCounts.UNKNOWN) -ForegroundColor Yellow
+    Write-Host $line92 -ForegroundColor Cyan
     Write-Host ""
 
     Write-Host "  Connection status:" -ForegroundColor Yellow
