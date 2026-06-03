@@ -127,16 +127,33 @@ function Add-Result {
 }
 
 # Convenience wrapper for MANL items: pass the automated verdict (PASS, FAIL,
-# WARN, NA, UNKNOWN) and a short evidence string. Status remains MANL per CIS,
-# but the Detail column now carries the auto-verdict so the summary can show
-# real PASS/FAIL signal in addition to the MANL flag.
+# WARN, NA, UNKNOWN) and a short evidence string.
+#
+# Status mapping (per repo policy override for Power Platform - see AGENTS.md):
+#   verdict PASS    -> Status = PASS
+#   verdict FAIL    -> Status = FAIL
+#   verdict WARN    -> Status = WARN
+#   verdict NA      -> Status = SKIP (CIS schema has no NA, SKIP is the closest)
+#   verdict UNKNOWN -> Status = MANL  (genuine human review required)
+#
+# This keeps the original Add-Result CSV schema (PASS|FAIL|WARN|SKIP|MANL) and
+# still records the auto-verdict explicitly in the Detail prefix `[AUTO: x]`
+# so the summary can group rows by verdict.
 function Add-MANL {
     param(
         [string]$Section, [string]$Title,
         [ValidateSet('PASS','FAIL','WARN','NA','UNKNOWN')][string]$Verdict,
         [string]$Evidence
     )
-    Add-Result -Section $Section -Title $Title -Status 'MANL' -Detail $Evidence -AutoVerdict $Verdict
+    $status = switch ($Verdict) {
+        'PASS'    { 'PASS' }
+        'FAIL'    { 'FAIL' }
+        'WARN'    { 'WARN' }
+        'NA'      { 'SKIP' }
+        'UNKNOWN' { 'MANL' }
+        default   { 'MANL' }
+    }
+    Add-Result -Section $Section -Title $Title -Status $status -Detail $Evidence -AutoVerdict $Verdict
 }
 
 function Invoke-Check {
@@ -1365,8 +1382,10 @@ function Show-Summary {
     Write-Host "  CIS Power Platform Foundations Benchmark v1.0.0 - RESULTS SUMMARY" -ForegroundColor Cyan
     Write-Host $line92 -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  Status column = CIS classification (all 16 items are Manual per CIS)." -ForegroundColor DarkGray
+    Write-Host "  Status column = effective status (PASS/FAIL/SKIP from auto-verdict; MANL when truly review-only)." -ForegroundColor DarkGray
     Write-Host "  AUTO column   = automated verdict from this script (PASS/FAIL/N/A/UNKNOWN)." -ForegroundColor DarkGray
+    Write-Host "  CIS classifies every Power Platform item as Manual; rows show MANL only when" -ForegroundColor DarkGray
+    Write-Host "  the script could not derive a definitive PASS/FAIL/SKIP from the API." -ForegroundColor DarkGray
     Write-Host ""
     Write-Host ("  {0,-8} {1,-50} {2,-6} {3}" -f "SECTION","TITLE","STATUS","AUTO")
     Write-Host ("  {0,-8} {1,-50} {2,-6} {3}" -f ("-"*8),("-"*50),("-"*6),("-"*8))
@@ -1374,7 +1393,7 @@ function Show-Summary {
     $autoCounts = @{ PASS=0; FAIL=0; WARN=0; NA=0; UNKNOWN=0 }
     $unknownRows = @()
     foreach ($r in $Script:Results) {
-        $col = switch ($r.Status) { "PASS"{"Green"} "FAIL"{"Red"} "MANL"{"Cyan"} default{"Magenta"} }
+        $col = switch ($r.Status) { "PASS"{"Green"} "FAIL"{"Red"} "MANL"{"Cyan"} "SKIP"{"DarkGray"} default{"Magenta"} }
         $t   = if ($r.Title.Length -gt 50) { $r.Title.Substring(0,47) + "..." } else { $r.Title }
         $auto = 'UNKNOWN'
         if ($r.Detail -match '^\[AUTO:\s*([A-Z/]+)\]') { $auto = $matches[1].Trim() }
@@ -1394,14 +1413,14 @@ function Show-Summary {
     Write-Host $line92 -ForegroundColor Cyan
     Write-Host ("  Items in report : {0,4}" -f $total)
     Write-Host ""
-    Write-Host "  CSV Status counts (CIS classification):" -ForegroundColor Yellow
+    Write-Host "  CSV Status counts (effective status):" -ForegroundColor Yellow
     $statusGroup = $Script:Results | Group-Object Status
     foreach ($g in $statusGroup) {
-        $sc = switch ($g.Name) { 'PASS'{'Green'} 'FAIL'{'Red'} 'MANL'{'Cyan'} 'WARN'{'Magenta'} default{'Gray'} }
+        $sc = switch ($g.Name) { 'PASS'{'Green'} 'FAIL'{'Red'} 'MANL'{'Cyan'} 'WARN'{'Magenta'} 'SKIP'{'DarkGray'} default{'Gray'} }
         Write-Host ("    {0,-6} : {1,4}" -f $g.Name, $g.Count) -ForegroundColor $sc
     }
     Write-Host ""
-    Write-Host "  AUTO verdict counts (automated assessment, all rows are MANL by CIS):" -ForegroundColor Yellow
+    Write-Host "  AUTO verdict counts (raw automated assessment, before status mapping):" -ForegroundColor Yellow
     Write-Host ("    PASS    : {0,4}" -f $autoCounts.PASS)    -ForegroundColor Green
     Write-Host ("    FAIL    : {0,4}" -f $autoCounts.FAIL)    -ForegroundColor Red
     Write-Host ("    N/A     : {0,4}" -f $autoCounts.NA)      -ForegroundColor DarkGray
@@ -1636,7 +1655,8 @@ Clear-Host
 Write-Host ""
 Write-Host "+==================================================================================+" -ForegroundColor Cyan
 Write-Host "|  CIS Microsoft Dynamics 365 / Power Platform Foundations Benchmark v1.0.0        |" -ForegroundColor Cyan
-Write-Host "|  16 recommendations - all Manual per CIS                                         |" -ForegroundColor Cyan
+Write-Host "|  16 recommendations - CIS classifies all as Manual; this script auto-verdicts when |" -ForegroundColor Cyan
+Write-Host "|  possible and only emits MANL for items that truly require human review.         |" -ForegroundColor Cyan
 Write-Host "+==================================================================================+" -ForegroundColor Cyan
 
 Connect-AllServices

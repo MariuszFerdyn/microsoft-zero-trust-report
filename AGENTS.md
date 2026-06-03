@@ -10,6 +10,13 @@ Key points, in short:
    `MANL`-status check (category `MANL`, function name `Check-MANL-<section>`)
    with portal path, audit steps, remediation, and references. Pull tenant
    diagnostic data where the API allows it.
+   **Power Platform exception:** for `CIS_Power_Platform_Benchmark_Full.ps1`,
+   when the script can derive a definitive automated verdict (PASS / FAIL /
+   N/A) from the BAP, Graph, or Dataverse Web API, promote that to the row's
+   `Status` (PASS, FAIL, or SKIP for N/A) and keep `MANL` only for items that
+   genuinely require human review (no API signal). The `[AUTO: ...]` prefix in
+   `Detail` always records the raw verdict regardless of the mapped status.
+   See `Add-MANL` in that script for the canonical mapping.
 2. **Update `README.md`** whenever coverage, status categories, CLI
    parameters, prerequisites, or sample output change.
 3. **Verify / update the Permissions helper** (`CIS_M365_Permissions.ps1` or

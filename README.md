@@ -8,13 +8,20 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 |-----------|---------|------------------:|--------------:|--------|--------------------|
 | CIS Microsoft Azure Foundations | v5.0.0 | 103 | 62 | `CIS_Azure_Benchmark_Full.ps1` | `CIS_Azure_Permissions.ps1` |
 | CIS Microsoft 365 Foundations | v6.0.1 | 129 | 11 | `CIS_M365_Benchmark_Full.ps1` | `CIS_M365_Permissions.ps1` |
-| CIS Microsoft Dynamics 365 / Power Platform Foundations | v1.0.0 | 0 | 16 | `CIS_Power_Platform_Benchmark_Full.ps1` | `CIS_Power_Platform_Permissions.ps1` |
+| CIS Microsoft Dynamics 365 / Power Platform Foundations | v1.0.0 | 16¹ | 16 | `CIS_Power_Platform_Benchmark_Full.ps1` | `CIS_Power_Platform_Permissions.ps1` |
 
 > **Manual (MANL) checks** cover CIS items that cannot be fully verified via
 > API. The scripts still surface them in a dedicated `SECTION MANL` block,
 > print the portal path, audit steps, and remediation, and — where possible —
 > pull diagnostic context from Graph / Exchange / Teams to help the operator
 > answer the item. MANL results are recorded in the CSV with `Status = MANL`.
+>
+> ¹ **Power Platform note:** all 16 items are classified Manual by CIS, but
+> `CIS_Power_Platform_Benchmark_Full.ps1` derives an automated verdict from the
+> BAP / Graph / Dataverse APIs wherever possible and promotes that verdict to
+> the row's `Status` (PASS / FAIL / SKIP). Only items that genuinely require
+> human review (no API signal) keep `Status = MANL`. The raw automated verdict
+> is always preserved in the `Detail` column as an `[AUTO: ...]` prefix.
 
 ---
 
@@ -190,7 +197,7 @@ Results are saved to a timestamped CSV file: `CIS_M365_Results_<date>.csv`
 | 3 | Data Management | 4 manual |
 | 4 | Logging and Auditing | 3 manual |
 
-> All 16 recommendations in the CIS Power Platform benchmark are marked
+> All 16 recommendations in the CIS Power Platform benchmark are classified
 > **Manual** by CIS. The script runs each as a `Check-MANL-<section>`
 > function that prints the portal path, audit steps, remediation, and
 > references, and — where APIs allow — pulls live diagnostic context from
@@ -213,6 +220,16 @@ Results are saved to a timestamped CSV file: `CIS_M365_Results_<date>.csv`
 > environment (Power Platform Admin Center → **Manage** → **Environments**
 > → pick env → **Membership** → **Add me**). The permissions helper prints
 > step-by-step instructions for both steps.
+>
+> **Status mapping:** unlike the Azure and M365 benchmarks (where every
+> Manual CIS item is reported as `Status = MANL`), the Power Platform script
+> promotes the automated verdict to the CSV `Status`:
+> `PASS → PASS`, `FAIL → FAIL`, `WARN → WARN`, `N/A → SKIP`,
+> `UNKNOWN → MANL`. Items appear as `MANL` only when the script could not
+> derive a definitive verdict from the APIs and human review is genuinely
+> required. The raw verdict is always written to the `Detail` column with an
+> `[AUTO: ...]` prefix so consumers can still aggregate by automated
+> assessment.
 
 ### Prerequisites
 
