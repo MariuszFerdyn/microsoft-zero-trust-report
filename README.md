@@ -9,7 +9,7 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 | CIS Microsoft Azure Foundations | v5.0.0 | 103 | 62 | `CIS_Azure_Benchmark_Full.ps1` | `CIS_Azure_Permissions.ps1` |
 | CIS Microsoft 365 Foundations | v6.0.1 | 129 | 11 | `CIS_M365_Benchmark_Full.ps1` | `CIS_M365_Permissions.ps1` |
 | CIS Microsoft Dynamics 365 / Power Platform Foundations | v1.0.0 | 16¹ | 16 | `CIS_Power_Platform_Benchmark_Full.ps1` | `CIS_Power_Platform_Permissions.ps1` |
-| CIS AKS Optimized Azure Linux 3 | v1.0.0 | 0² | 141 | `CIS_AKS_Benchmark_Full.ps1` | `CIS_AKS_Permissions.ps1` |
+| CIS AKS Optimized Azure Linux 3 | v1.0.0 | 0² | 141 | `CIS_AKS_Benchmark_Full.ps1` | _(none — operator's existing kubeconfig)_ |
 
 > **Manual (MANL) checks** cover CIS items that cannot be fully verified via
 > API. The scripts still surface them in a dedicated `SECTION MANL` block,
@@ -338,18 +338,30 @@ Results are saved to a timestamped CSV file: `CIS_PowerPlatform_Results_<date>.c
 
 ### Prerequisites
 
-- **Azure CLI (`az`)** — required to read the cluster (`az aks show`),
-  fetch a kubeconfig (`az aks get-credentials`), and (optionally) create
-  the App Registration / Service Principal that runs the audit.
-- **`kubectl`** — required to list nodes and to launch the `kubectl debug
-  node` pods that perform the on-node audit. Kubernetes ≥ 1.23 is needed
-  for `kubectl debug node`.
-- **AKS RBAC roles** on the cluster scope (assigned by the helper, or
-  already granted to the operator):
-  - **Reader** – cluster metadata via ARM
-  - **Azure Kubernetes Service Cluster User Role** – issue a kubeconfig
-  - **Azure Kubernetes Service RBAC Cluster Admin** – allow `kubectl debug
-    node` to create privileged debug pods
+> **You must already be logged into the cluster, and `kubectl` must be
+> working against it before you run the benchmark.** The script does not
+> perform `az login` or `az aks get-credentials` for you — it assumes
+> you have a working kubeconfig (the current context must point at the
+> cluster you want to audit) and that `kubectl get nodes` succeeds.
+>
+> Quick check on Linux / WSL or Windows:
+>
+> ```bash
+> az account set --subscription "<sub-guid>"
+> az aks get-credentials --resource-group "<aks-rg>" --name "<aks-cluster-name>" --overwrite-existing
+> kubectl get nodes      # must return your node list with STATUS=Ready
+> ```
+
+- **Azure CLI (`az`)** — used to read cluster metadata (`az aks show`,
+  `az aks list`).
+- **`kubectl`** — used to list nodes and to launch the privileged debug
+  pods that perform the on-node audit. Kubernetes ≥ 1.23 is required for
+  `kubectl debug node`.
+- **Cluster permissions** — your current `kubectl` context needs to be
+  able to (a) `get` and `list` `nodes` and (b) create privileged pods
+  via `kubectl debug node` (i.e. cluster-admin equivalent). On AKS this
+  is typically granted via the **Azure Kubernetes Service RBAC Cluster
+  Admin** Azure role, but any kubeconfig with equivalent rights works.
 
 > **No SSH is used.** The script audits each node by launching a
 > privileged debug pod via `kubectl debug node/<name>` (the pod runs on
@@ -360,52 +372,11 @@ Results are saved to a timestamped CSV file: `CIS_PowerPlatform_Results_<date>.c
 > No Microsoft Graph permissions are required — the AKS benchmark does not
 > query Entra ID.
 
-### Permissions Setup (optional)
-
-`CIS_AKS_Permissions.ps1` is **only needed if you don't already have the
-three AKS RBAC roles above on your account / service principal**. If you
-can already run `az aks get-credentials` and `kubectl get nodes`
-successfully, you can skip the helper entirely and jump straight to
-[Running the Audit](#running-the-audit).
-
-When you do need it:
-
-```powershell
-.\CIS_AKS_Permissions.ps1 `
-    -TenantId       "<tenant-guid>" `
-    -SubscriptionId "<sub-guid>" `
-    -ResourceGroup  "<aks-rg>" `
-    -ClusterName    "<aks-cluster-name>"
-```
-
-Options:
-- `-AppName "CIS-AKS-Benchmark-Audit"` — custom app registration name
-- `-AppId "<existing-app-guid>"` — reuse an existing app registration
-- `-NoSecret` — skip client-secret creation (by default every run mints a
-  fresh secret so the printed benchmark command is ready to copy-paste)
-- `-InteractiveOnly` — skip SP creation; assign the three RBAC roles to
-  the *currently signed-in `az` user* instead (good for ad-hoc operator
-  runs)
-- `-NoPause` — skip the "Run benchmark now? [Y/N]" prompt at the end
-
-The helper assigns the three Azure RBAC roles listed above on the cluster
-scope, runs `az aks get-credentials`, and prints the ready-to-run
-benchmark command. It then prompts **"Run benchmark now? [Y/N]"** and, on
-`Y`, launches `CIS_AKS_Benchmark_Full.ps1` with the parameters that were
-just configured.
-
 ### Running the Audit
 
-If you already have a kubeconfig (e.g. you ran `az aks get-credentials`
-yourself) and your account has cluster-admin / `kubectl debug node`
-rights, run the benchmark directly — no helper required:
+Once `kubectl get nodes` works against your cluster:
 
 ```powershell
-# one-time, if not already done:
-az account set --subscription "<sub-guid>"
-az aks get-credentials --resource-group "<aks-rg>" --name "<aks-cluster-name>" --overwrite-existing
-
-# audit:
 .\CIS_AKS_Benchmark_Full.ps1 `
     -SubscriptionId "<sub-guid>" `
     -ResourceGroup  "<aks-rg>" `

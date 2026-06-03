@@ -47,9 +47,17 @@
     No Microsoft Graph permissions are required - the benchmark does not query
     Entra ID.
 
-    See CIS_AKS_Permissions.ps1 for the helper that performs the
-    `az aks get-credentials` and confirms the SP / current user has
-    "Azure Kubernetes Service RBAC Cluster Admin" on the cluster.
+    Prerequisites (the script does NOT perform these for you):
+        - You must already be logged into Azure (`az login` /
+          `az account set --subscription <id>`).
+        - You must already have a kubeconfig pointing at the target
+          cluster (`az aks get-credentials -g <rg> -n <name>
+          --overwrite-existing`).
+        - `kubectl get nodes` must succeed against the cluster, and
+          your context must have rights to create privileged debug
+          pods via `kubectl debug node` (cluster-admin equivalent;
+          on AKS this is granted by the "Azure Kubernetes Service
+          RBAC Cluster Admin" Azure role).
 
 .PARAMETER SubscriptionId
     Azure subscription containing the AKS cluster.  Optional - the current
