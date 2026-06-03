@@ -344,16 +344,31 @@ Results are saved to a timestamped CSV file: `CIS_PowerPlatform_Results_<date>.c
 - **`kubectl`** — required to list nodes and to launch the `kubectl debug
   node` pods that perform the on-node audit. Kubernetes ≥ 1.23 is needed
   for `kubectl debug node`.
-- **AKS RBAC roles** on the cluster scope (assigned by the helper):
+- **AKS RBAC roles** on the cluster scope (assigned by the helper, or
+  already granted to the operator):
   - **Reader** – cluster metadata via ARM
   - **Azure Kubernetes Service Cluster User Role** – issue a kubeconfig
   - **Azure Kubernetes Service RBAC Cluster Admin** – allow `kubectl debug
     node` to create privileged debug pods
 
+> **No SSH is used.** The script audits each node by launching a
+> privileged debug pod via `kubectl debug node/<name>` (the pod runs on
+> that node with `hostPID` / `hostNetwork` and chroots to `/host` to
+> read the host filesystem). The pod is ephemeral and is removed by
+> Kubernetes when the audit completes.
+
 > No Microsoft Graph permissions are required — the AKS benchmark does not
 > query Entra ID.
 
-### Permissions Setup
+### Permissions Setup (optional)
+
+`CIS_AKS_Permissions.ps1` is **only needed if you don't already have the
+three AKS RBAC roles above on your account / service principal**. If you
+can already run `az aks get-credentials` and `kubectl get nodes`
+successfully, you can skip the helper entirely and jump straight to
+[Running the Audit](#running-the-audit).
+
+When you do need it:
 
 ```powershell
 .\CIS_AKS_Permissions.ps1 `
@@ -381,7 +396,16 @@ just configured.
 
 ### Running the Audit
 
+If you already have a kubeconfig (e.g. you ran `az aks get-credentials`
+yourself) and your account has cluster-admin / `kubectl debug node`
+rights, run the benchmark directly — no helper required:
+
 ```powershell
+# one-time, if not already done:
+az account set --subscription "<sub-guid>"
+az aks get-credentials --resource-group "<aks-rg>" --name "<aks-cluster-name>" --overwrite-existing
+
+# audit:
 .\CIS_AKS_Benchmark_Full.ps1 `
     -SubscriptionId "<sub-guid>" `
     -ResourceGroup  "<aks-rg>" `
