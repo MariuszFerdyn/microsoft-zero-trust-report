@@ -935,24 +935,27 @@ function Check-MANL-2_5 {
             $resp = $null
             $tenantId = $TenantId
             # Multiple endpoints have shipped over time; try newest first.
-            # Older endpoints 404 on most modern tenants, newer ones 404 on
-            # tenants that never opted in. Capture each failure so the user
-            # can see which endpoint actually returned what.
+            # The canonical one (used by Get-PowerAppTenantIsolationPolicy in
+            # Microsoft.PowerApps.Administration.PowerShell) is the
+            # admin/{tenantId}/tenantIsolationPolicy form.
             $endpoints = @(
+                "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/$tenantId/tenantIsolationPolicy?api-version=2020-10-01",
                 "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/tenantIsolationPolicy?api-version=2020-10-01",
                 "https://api.bap.microsoft.com/providers/PowerPlatform.Governance/v1/tenants/$tenantId/crossTenantAccessPolicy?api-version=2020-10-01",
                 "https://api.bap.microsoft.com/providers/PowerPlatform.Governance/v1/tenantIsolationPolicy?api-version=2020-10-01"
             )
             $perEndpointErr = @()
+            $all404 = $true
             foreach ($u in $endpoints) {
                 try {
                     $resp = Invoke-BapApi -Url $u
-                    if ($resp) { Write-Info "  Got response from: $u"; break }
+                    if ($resp) { Write-Info "  Got response from: $u"; $all404 = $false; break }
                 } catch {
                     $st = ''
                     if ($_.Exception.Response) { try { $st = [int]$_.Exception.Response.StatusCode } catch {} }
                     $em = $_.Exception.Message.Split([char]10)[0]
                     $perEndpointErr += "$u -> HTTP $st ($em)"
+                    if ($st -ne 404) { $all404 = $false }
                 }
             }
             if ($perEndpointErr.Count -gt 0 -and -not $resp) {
@@ -982,9 +985,19 @@ function Check-MANL-2_5 {
                 Add-MANL "2.5" "Cross-tenant isolation enabled" $verdict "Enabled=$enabled; allow-list count=$(@($allow).Count)"
                 Write-Manl "Verify the allow-list and direction in the Power Platform Admin Center."
             } else {
-                Write-Manl "Could not read tenant isolation policy via BAP API (tried $($endpoints.Count) endpoints; see captured errors)."
-                $hint = if ($Script:LastErrors['BAP:tenantIsolation']) { $Script:LastErrors['BAP:tenantIsolation'] } else { Get-BapErrorHint }
-                Add-MANL "2.5" "Cross-tenant isolation enabled" 'UNKNOWN' "BAP tenantIsolation endpoints all failed - $hint"
+                # All endpoints returned 404 = tenant isolation policy has
+                # never been configured for this tenant, which per CIS means
+                # cross-tenant isolation is NOT enabled - emit FAIL with a
+                # clear remediation pointer. Any other status (401/403/5xx)
+                # is genuine ambiguity, so keep UNKNOWN there.
+                if ($all404) {
+                    Write-Manl "Tenant isolation policy not configured (all $($endpoints.Count) endpoints 404) - cross-tenant isolation is OFF."
+                    Add-MANL "2.5" "Cross-tenant isolation enabled" 'FAIL' "Cross-tenant isolation is NOT configured (BAP returned 404 for all $($endpoints.Count) tenantIsolationPolicy endpoints). Enable in PPAC > Policies > Tenant isolation."
+                } else {
+                    Write-Manl "Could not read tenant isolation policy via BAP API (tried $($endpoints.Count) endpoints; see captured errors)."
+                    $hint = if ($Script:LastErrors['BAP:tenantIsolation']) { $Script:LastErrors['BAP:tenantIsolation'] } else { Get-BapErrorHint }
+                    Add-MANL "2.5" "Cross-tenant isolation enabled" 'UNKNOWN' "BAP tenantIsolation endpoints all failed - $hint"
+                }
             }
         } else {
             Write-Manl "BAP API not connected - verify in the Power Platform Admin Center."
