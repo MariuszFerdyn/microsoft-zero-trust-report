@@ -1504,6 +1504,51 @@ function Invoke-DataverseSelfTest {
         Write-Info "    BusinessUnitId = $($resp.BusinessUnitId)"
         Write-Info "    OrganizationId = $($resp.OrganizationId)"
         Write-Host "  -> SP IS registered as an Application User in this environment." -ForegroundColor Green
+
+        # 3) Run the same Dataverse queries each MANL check would issue, so
+        #    we can see exactly which one fails (and with what error) when
+        #    WhoAmI succeeds but the checks themselves keep saying "unavailable".
+        Write-Host ""
+        Write-Host "  Running per-check Dataverse probes:" -ForegroundColor Cyan
+        $probes = @(
+            @{ For='1.2'; Path = "organizations?`$select=sessiontimeoutenabled,sessiontimeoutinminutes,inactivitytimeoutenabled,inactivitytimeoutinminutes" },
+            @{ For='2.3'; Path = "organizations?`$select=blockedattachments" },
+            @{ For='3.2'; Path = "roles?`$select=name,roleid&`$top=5" },
+            @{ For='3.3'; Path = "queues?`$select=name,incomingemaildeliverymethod&`$top=5" },
+            @{ For='4.1'; Path = "audits?`$top=1&`$select=auditid" },
+            @{ For='4.2'; Path = "organizations?`$select=isauditenabled,isuseraccessauditenabled" }
+        )
+        foreach ($p in $probes) {
+            $purl = "$InstanceUrl/api/data/v9.2/$($p.Path)"
+            try {
+                $ph = @{ Authorization = "Bearer $tok"; Accept = 'application/json'; 'OData-Version' = '4.0'; 'OData-MaxVersion' = '4.0' }
+                $pr = Invoke-RestMethod -Uri $purl -Headers $ph -Method GET -ErrorAction Stop
+                $cnt = if ($pr.value) { @($pr.value).Count } else { 'scalar' }
+                Write-Host "    [$($p.For)] OK  ($cnt rows) :: $($p.Path)" -ForegroundColor Green
+            } catch {
+                $st = ''
+                if ($_.Exception.Response) { try { $st = [int]$_.Exception.Response.StatusCode } catch {} }
+                $body = ''
+                try {
+                    $stream = $_.Exception.Response.GetResponseStream()
+                    if ($stream) {
+                        $reader = New-Object System.IO.StreamReader($stream)
+                        $body = $reader.ReadToEnd()
+                        $reader.Close()
+                    }
+                } catch {}
+                Write-Host "    [$($p.For)] FAIL HTTP $st :: $($p.Path)" -ForegroundColor Red
+                if ($body) {
+                    foreach ($ln in ($body -split [char]10)) {
+                        $t = $ln.TrimEnd([char]13)
+                        if ($t) { Write-Host "        $t" -ForegroundColor DarkRed }
+                    }
+                } else {
+                    Write-Host "        $($_.Exception.Message)" -ForegroundColor DarkRed
+                }
+                $Script:LastErrors["SelfTest:Probe$($p.For)"] = "HTTP $st :: $body $($_.Exception.Message)"
+            }
+        }
     } catch {
         $status = ''
         if ($_.Exception.Response) { try { $status = [int]$_.Exception.Response.StatusCode } catch {} }
