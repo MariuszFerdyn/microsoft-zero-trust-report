@@ -270,17 +270,28 @@ function Invoke-BapApi {
 # 400/403 on tenants without the corresponding licenses.
 function Get-AllEnvironments {
     if ($Script:Environments -and $Script:Environments.Count -gt 0) { return $Script:Environments }
-    if (-not $Script:BapConnected) { return @() }
+    if (-not $Script:BapConnected) {
+        $Script:LastErrors['BAP'] = 'BAP not connected (no token acquired - check SP credentials and -RegisterAsPowerAppMgmtApp).'
+        return @()
+    }
     $apiVersions = @('2022-05-01','2021-04-01','2020-10-01','2020-08-01-preview','2019-05-01')
-    $lastErr = $null
+    $lastErr   = $null
+    $emptyVer  = $null
     foreach ($ver in $apiVersions) {
         try {
             $url  = "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments?api-version=$ver"
             $resp = Invoke-BapApi -Url $url
-            if ($resp -and $resp.value) {
+            if ($resp -and $resp.value -and @($resp.value).Count -gt 0) {
                 $Script:Environments = @($resp.value)
                 if ($ver -ne $apiVersions[0]) { Write-Info "  Environments enumerated via fallback api-version=$ver." }
                 return $Script:Environments
+            } else {
+                # 200 OK but empty value array: SP authenticated to BAP but cannot
+                # see any environments. This is the SP-not-registered-with-PP-mgmt
+                # case (admin SP role missing) - distinct from a hard API failure.
+                $emptyVer = $ver
+                $valueCount = if ($resp.value) { @($resp.value).Count } else { 'null' }
+                $Script:LastErrors["BAP env-list api-version=$ver"] = "HTTP 200 OK but value=[$valueCount] env(s) - SP authenticated but has zero environments visible (likely missing admin role / not registered with PowerApps management)."
             }
         } catch {
             $lastErr = $_.Exception.Message.Split([char]10)[0]
@@ -288,10 +299,15 @@ function Get-AllEnvironments {
             continue
         }
     }
-    Write-Info "  BAP env enumeration failed on all api-versions. Last error: $lastErr"
+    if ($lastErr) {
+        Write-Info "  BAP env enumeration failed on all api-versions. Last error: $lastErr"
+        $Script:LastErrors['BAP'] = $lastErr
+    } elseif ($emptyVer) {
+        Write-Info "  BAP env enumeration: API returned 0 environments (SP authenticated but cannot see any envs)."
+        $Script:LastErrors['BAP'] = "BAP returned 0 environments. SP authenticated OK but is not registered as a PowerApps management app, so it sees no envs. Run once interactively as a Global / Power Platform admin: Add-PowerAppsAccount; New-PowerAppManagementApp -ApplicationId <appId>"
+    }
     Write-Info "  Most common cause: SP not registered. Run once interactively as a PP admin:"
     Write-Info "    Add-PowerAppsAccount; New-PowerAppManagementApp -ApplicationId <appId>"
-    if ($lastErr) { $Script:LastErrors['BAP'] = $lastErr }
     $Script:Environments = @()
     return @()
 }
@@ -546,7 +562,7 @@ function Check-MANL-1_2 {
             $verdict = if ($bad.Count -eq 0) { 'PASS' } else { 'FAIL' }
             Add-MANL "1.2" "User sessions terminated on time limit / logoff" $verdict $detail
         } else {
-            Add-MANL "1.2" "User sessions terminated on time limit / logoff" $(if ($envs.Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail $envs.Count)
+            Add-MANL "1.2" "User sessions terminated on time limit / logoff" $(if (@($envs).Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail @($envs).Count)
         }
         Write-Manl "Verify the per-env values above against organizational policy."
     }
@@ -792,7 +808,7 @@ function Check-MANL-2_3 {
             $verdict = if ($missing.Count -eq 0) { 'PASS' } else { 'FAIL' }
             Add-MANL "2.3" "Blocked file extensions match enterprise block list" $verdict $detail
         } else {
-            Add-MANL "2.3" "Blocked file extensions match enterprise block list" $(if ($envs.Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail $envs.Count)
+            Add-MANL "2.3" "Blocked file extensions match enterprise block list" $(if (@($envs).Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail @($envs).Count)
         }
         Write-Manl "Verify the per-env extension list against the organizational block list."
     }
@@ -1010,7 +1026,7 @@ function Check-MANL-3_2 {
         if ($envsOk -gt 0) {
             Add-MANL "3.2" "Extract customer data privileges controlled" 'UNKNOWN' "Envs queried=$envsOk; review per-role privacy privilege counts above."
         } else {
-            Add-MANL "3.2" "Extract customer data privileges controlled" $(if ($envs.Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail $envs.Count)
+            Add-MANL "3.2" "Extract customer data privileges controlled" $(if (@($envs).Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail @($envs).Count)
         }
         Write-Manl "Privacy-related privileges should be granted only to roles that strictly need them."
     }
@@ -1067,7 +1083,7 @@ function Check-MANL-3_3 {
             $verdict = if ($bad.Count -eq 0) { 'PASS' } else { 'FAIL' }
             Add-MANL "3.3" "Public-queue incoming email actions restricted" $verdict $detail
         } else {
-            Add-MANL "3.3" "Public-queue incoming email actions restricted" $(if ($envs.Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail $envs.Count)
+            Add-MANL "3.3" "Public-queue incoming email actions restricted" $(if (@($envs).Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail @($envs).Count)
         }
         Write-Manl "CIS-compliant incoming methods are 'None' (0) or 'Forward Mailbox' (4)."
     }
@@ -1180,7 +1196,7 @@ function Check-MANL-4_1 {
         if ($envsOk -gt 0) {
             Add-MANL "4.1" "System Administrator role changes reviewed" 'UNKNOWN' "Envs queried=$envsOk; total admin assignments=$totalAdmins"
         } else {
-            Add-MANL "4.1" "System Administrator role changes reviewed" $(if ($envs.Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail $envs.Count)
+            Add-MANL "4.1" "System Administrator role changes reviewed" $(if (@($envs).Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail @($envs).Count)
         }
         Write-Manl "Review the per-env System Administrator membership above and remove unauthorized users."
     }
@@ -1236,7 +1252,7 @@ function Check-MANL-4_2 {
             $verdict = if ($bad.Count -eq 0) { 'PASS' } else { 'FAIL' }
             Add-MANL "4.2" "Environment Activity logging enabled" $verdict $detail
         } else {
-            Add-MANL "4.2" "Environment Activity logging enabled" $(if ($envs.Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail $envs.Count)
+            Add-MANL "4.2" "Environment Activity logging enabled" $(if (@($envs).Count -eq 0) { 'NA' } else { 'UNKNOWN' }) (Get-DataverseFallbackDetail @($envs).Count)
         }
         Write-Manl "All three audit flags (Start, Log Access, Read Logs) must be enabled per CIS."
     }
