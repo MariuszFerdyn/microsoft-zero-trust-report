@@ -9,7 +9,7 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 | CIS Microsoft Azure Foundations | v5.0.0 | 103 | 62 | `CIS_Azure_Benchmark_Full.ps1` | `CIS_Azure_Permissions.ps1` |
 | CIS Microsoft 365 Foundations | v6.0.1 | 129 | 11 | `CIS_M365_Benchmark_Full.ps1` | `CIS_M365_Permissions.ps1` |
 | CIS Microsoft Dynamics 365 / Power Platform Foundations | v1.0.0 | 16¹ | 16 | `CIS_Power_Platform_Benchmark_Full.ps1` | `CIS_Power_Platform_Permissions.ps1` |
-| CIS AKS Optimized Azure Linux 3 | v1.0.0 | 0² | 141 | `CIS_AKS_Benchmark_Full.ps1` | _(none — operator's existing kubeconfig)_ |
+| CIS AKS Optimized Azure Linux 3 | v1.0.0 | 75² | 66 | `CIS_AKS_Benchmark_Full.ps1` | _(none — operator's existing kubeconfig)_ |
 
 > **Manual (MANL) checks** cover CIS items that cannot be fully verified via
 > API. The scripts still surface them in a dedicated `SECTION MANL` block,
@@ -26,13 +26,20 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 >
 > ² **AKS Azure Linux 3 note:** every item in the CIS AKS Optimized Azure
 > Linux 3 Benchmark is a Linux OS-level audit (kernel modules, partitions,
-> sysctl, SSH, PAM, auditd, file permissions). None can be evaluated through
-> Azure ARM, Microsoft Graph, or kubectl against managed-cluster endpoints,
-> so all 141 items ship as `Status = MANL` with the verbatim CIS Audit and
-> Remediation procedure in the `Detail` column. Pass `-RunOnNodes` to
-> launch a privileged `kubectl debug node` pod on each Ready node and
-> attach captured per-node evidence to each row's `Detail` for human
-> review.
+> sysctl, SSH, PAM, auditd, file permissions). None can be evaluated
+> through Azure ARM, Microsoft Graph, or kubectl against managed-cluster
+> endpoints, so the script collects evidence by running a privileged
+> `kubectl debug node` pod (chrooted to `/host`) on each Ready node when
+> `-RunOnNodes` is supplied. About **75 items** ship with on-node
+> evaluators that derive a real PASS / FAIL / SKIP verdict from the
+> captured output (kernel modules, sysctl, package presence, mount
+> options, file modes/owners, sshd config, systemd unit state). The
+> remaining **66 items** stay `Status = MANL` because the CIS Audit
+> logic is too item-specific to encode generically (e.g. PAM stack,
+> auditd rules, password aging, banner contents, complex postfix
+> checks) — these rows still print the verbatim CIS Audit and
+> Remediation procedure in the `Detail` column for human review,
+> together with the per-node captured output.
 
 ---
 

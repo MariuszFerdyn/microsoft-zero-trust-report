@@ -10,22 +10,16 @@
     auditd, file permissions, logging) that audit the host OS of every AKS
     worker node running on the "AzureLinux" / "AzureLinux3" osSku.
 
-    Because every recommendation is a Linux shell-based audit on the node, none
-    of them can be evaluated through Azure ARM, Microsoft Graph, or kubectl
-    against managed-cluster endpoints.  In line with the repo's MANL pattern,
-    this script:
+    The script ships with on-node evaluators for ~75 items (kernel modules,
+    package presence, sysctl values, mount options, file modes/owners, sshd
+    config, systemd unit state).  Items with an evaluator emit real
+    PASS / FAIL / SKIP based on per-node output captured via
+    `kubectl debug node`; items without an evaluator (CIS audit logic too
+    item-specific to encode generically) keep Status = MANL with the
+    verbatim CIS Audit + Remediation procedure printed for human review.
 
-      * verifies the AKS cluster is reachable and reports each node's osSku,
-        kubernetes version, and OS image (so the operator knows the benchmark
-        is being applied to the right OS);
-      * for each of the 141 items, emits a row with Status = MANL and includes
-        the CIS Audit + Remediation procedure verbatim in the Detail column;
-      * when -RunOnNodes is supplied, launches a privileged
-        `kubectl debug node/<name>` pod per node, executes the CIS Audit
-        commands inside `chroot /host`, captures the raw output, and appends
-        it to the Detail column as "[NODE: <name>] <captured>".  The status
-        stays MANL - the operator interprets the captured evidence against
-        the Audit pass criteria printed alongside it.
+    Pass `-RunOnNodes` to run the on-node harness; without it, every item
+    is reported as MANL (no node evidence collected).
 
     CSV schema (unchanged from sister benchmarks):
         Section, Title, Status, Detail
@@ -253,46 +247,322 @@ function Invoke-NodeAudit {
         [Parameter(Mandatory=$true)][string]$NodeName,
         [Parameter(Mandatory=$true)][string]$Script
     )
+    # Normalize line endings to LF - PowerShell here-strings produce CRLF on
+    # Windows, but bash chokes on CR inside function bodies.
+    $Script = $Script -replace "`r`n","`n" -replace "`r","`n"
     # Encode script as base64 to avoid shell-quoting headaches.
     $bytes  = [System.Text.Encoding]::UTF8.GetBytes($Script)
     $b64    = [Convert]::ToBase64String($bytes)
-    $podCmd = @"
-set -e
-echo '$b64' | base64 -d > /tmp/cis_audit.sh
-chmod +x /tmp/cis_audit.sh
-chroot /host /bin/bash /proc/`$`$/root/tmp/cis_audit.sh 2>&1
-"@
-    # Use kubectl debug node; image is overridable. The pod is ephemeral.
-    $tempPath = [System.IO.Path]::GetTempFileName()
+    $podCmd = "set -e; echo '$b64' | base64 -d > /tmp/cis_audit.sh; chmod +x /tmp/cis_audit.sh; chroot /host /bin/bash /proc/`$`$/root/tmp/cis_audit.sh 2>&1"
     try {
-        Set-Content -Path $tempPath -Value $podCmd -Encoding UTF8 -NoNewline
         $output = kubectl debug "node/$NodeName" --image=$DebugImage --quiet=true -- /bin/bash -c $podCmd 2>&1
         return ($output | Out-String).Trim()
     } catch {
         return "ERROR: $($_.Exception.Message)"
-    } finally {
-        if (Test-Path $tempPath) { Remove-Item $tempPath -Force -ErrorAction SilentlyContinue }
     }
 }
 
 function Build-AuditScript {
-    # Build a single bash script that runs every CIS audit command and emits
-    # delimited blocks the wrapper can split by section.
-    $lines = New-Object System.Text.StringBuilder
-    [void]$lines.AppendLine('#!/usr/bin/env bash')
-    [void]$lines.AppendLine('# CIS AKS Optimized Azure Linux 3 - on-node audit harness')
-    [void]$lines.AppendLine('export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
+    # Build a bash audit harness that calls per-item evaluators where defined.
+    # Each evaluator emits exactly one of:
+    #     PASS
+    #     FAIL: <reason>
+    #     SKIP: <reason>
+    # between the section markers.  Items not in $Script:Evaluators are
+    # surrounded by markers but the harness emits nothing - the wrapper keeps
+    # those as MANL.
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('#!/usr/bin/env bash')
+    [void]$sb.AppendLine('# CIS AKS Optimized Azure Linux 3 - on-node audit harness')
+    [void]$sb.AppendLine('export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
+    [void]$sb.AppendLine('export LC_ALL=C')
+    [void]$sb.AppendLine(@'
+# ---- helper functions --------------------------------------------------------
+_have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+# Pass if package is NOT installed (rpm-based: tdnf/dnf on Azure Linux).
+_pkg_not_installed() {
+    local p="$1"
+    if rpm -q "$p" >/dev/null 2>&1; then
+        echo "FAIL: package '$p' is installed: $(rpm -q "$p" 2>&1)"
+    else
+        echo "PASS"
+    fi
+}
+
+# Pass if package IS installed.
+_pkg_installed() {
+    local p="$1"
+    if rpm -q "$p" >/dev/null 2>&1; then
+        echo "PASS"
+    else
+        echo "FAIL: package '$p' is NOT installed"
+    fi
+}
+
+# Pass if kernel module is not loaded AND is blacklisted/install-disabled.
+_kernel_module_check() {
+    local m="$1"
+    if lsmod 2>/dev/null | awk '{print $1}' | grep -qx "$m"; then
+        echo "FAIL: module '$m' is loaded (lsmod)"
+        return
+    fi
+    local cfg
+    cfg=$(modprobe --showconfig 2>/dev/null | grep -E "^(blacklist|install)[[:space:]]+$m([[:space:]]|$)" || true)
+    if [ -z "$cfg" ]; then
+        echo "FAIL: module '$m' is not blacklisted/install-disabled"
+        return
+    fi
+    echo "PASS"
+}
+
+# Pass if every sysctl key in $@ resolves to its required value.
+# Args: key1=val1 key2=val2 ...
+_sysctl_check() {
+    local fail=""
+    for kv in "$@"; do
+        local k="${kv%%=*}"
+        local want="${kv#*=}"
+        local got
+        got=$(sysctl -n "$k" 2>/dev/null)
+        if [ "$got" != "$want" ]; then
+            fail="$fail $k=$got(want $want)"
+        fi
+    done
+    if [ -n "$fail" ]; then
+        echo "FAIL:$fail"
+    else
+        echo "PASS"
+    fi
+}
+
+# Pass if `stat -c '%a %U %G' $f` matches one of the allowed mode/owner/group
+# combinations supplied in $2..N (e.g. "600 root root").
+_stat_check() {
+    local f="$1"; shift
+    if [ ! -e "$f" ]; then
+        echo "SKIP: $f does not exist"
+        return
+    fi
+    local actual
+    actual=$(stat -c '%a %U %G' "$f" 2>/dev/null)
+    for spec in "$@"; do
+        if [ "$actual" = "$spec" ]; then
+            echo "PASS"
+            return
+        fi
+    done
+    echo "FAIL: $f actual='$actual' allowed='$*'"
+}
+
+# Pass if `sshd -T | grep -i ^$key` returns a value matching $expected (case-insensitive).
+_sshd_check() {
+    local key="$1"; local want="$2"
+    if ! _have_cmd sshd; then
+        echo "SKIP: sshd binary not present"
+        return
+    fi
+    local got
+    got=$(sshd -T 2>/dev/null | awk -v k="$key" 'tolower($1)==tolower(k){print $2; exit}')
+    if [ -z "$got" ]; then
+        echo "FAIL: sshd has no '$key' setting"
+        return
+    fi
+    if [ "${got,,}" = "${want,,}" ]; then
+        echo "PASS"
+    else
+        echo "FAIL: sshd $key=$got (want $want)"
+    fi
+}
+
+# Pass if systemctl reports the unit is enabled (or active).
+_unit_enabled() {
+    local u="$1"
+    local s
+    s=$(systemctl is-enabled "$u" 2>/dev/null)
+    if [ "$s" = "enabled" ] || [ "$s" = "static" ] || [ "$s" = "alias" ]; then
+        echo "PASS"
+    else
+        local a; a=$(systemctl is-active "$u" 2>/dev/null)
+        if [ "$a" = "active" ]; then echo "PASS"; else echo "FAIL: $u is-enabled='$s' is-active='$a'"; fi
+    fi
+}
+
+# Pass if unit is NOT enabled and NOT active (masked / disabled / not-found).
+_unit_not_in_use() {
+    local u="$1"
+    local s; s=$(systemctl is-enabled "$u" 2>/dev/null)
+    local a; a=$(systemctl is-active  "$u" 2>/dev/null)
+    if [ "$s" = "enabled" ] || [ "$a" = "active" ]; then
+        echo "FAIL: $u is-enabled='$s' is-active='$a'"
+    else
+        echo "PASS"
+    fi
+}
+
+# Pass if the file is mounted on its own partition (1.1.2.x.1 family).
+_separate_partition() {
+    local mp="$1"
+    if findmnt -kn "$mp" >/dev/null 2>&1; then echo "PASS"; else echo "FAIL: $mp is not a separate mount"; fi
+}
+
+# Pass if the mount point has the requested option set.
+_mount_option() {
+    local mp="$1"; local opt="$2"
+    if ! findmnt -kn "$mp" >/dev/null 2>&1; then
+        echo "SKIP: $mp is not mounted"
+        return
+    fi
+    local opts
+    opts=$(findmnt -kn -o OPTIONS "$mp" 2>/dev/null)
+    if echo ",$opts," | grep -q ",$opt,"; then echo "PASS"; else echo "FAIL: $mp options='$opts' missing '$opt'"; fi
+}
+'@)
+
     foreach ($it in $Script:CIS_ITEMS) {
         $sec = $it.Section
-        [void]$lines.AppendLine("echo '<<<CIS:$sec>>>'")
-        # We do not synthesize per-item shell logic from natural-language Audit text.
-        # Instead we capture a small set of generic evidence (uname / mounts / loaded
-        # modules / failed services) that helps the operator answer most items.
-        # The full Audit text is printed by the wrapper alongside each row.
-        [void]$lines.AppendLine("echo '# (no automated audit harness for this section - see Audit text in CSV)'")
-        [void]$lines.AppendLine("echo '<<<CIS_END:$sec>>>'")
+        [void]$sb.AppendLine("echo '<<<CIS:$sec>>>'")
+        if ($Script:Evaluators.ContainsKey($sec)) {
+            [void]$sb.AppendLine($Script:Evaluators[$sec])
+        }
+        [void]$sb.AppendLine("echo '<<<CIS_END:$sec>>>'")
     }
-    return $lines.ToString()
+    return $sb.ToString()
+}
+
+# ===============================================================================
+#  PER-ITEM EVALUATORS
+# ===============================================================================
+# Items keyed by CIS section get a real PASS/FAIL/SKIP from on-node audit.
+# Items NOT keyed here keep Status=MANL with full Audit/Remediation text in
+# Detail (operator runs the audit themselves and interprets).
+$Script:Evaluators = @{
+    # ----- 1.1.1 Filesystem kernel modules ------------------------------------
+    '1.1.1.1' = '_kernel_module_check cramfs'
+    '1.1.1.2' = '_kernel_module_check freevxfs'
+    '1.1.1.3' = '_kernel_module_check hfs'
+    '1.1.1.4' = '_kernel_module_check hfsplus'
+    '1.1.1.5' = '_kernel_module_check jffs2'
+
+    # ----- 1.1.2 Filesystem partitions ----------------------------------------
+    '1.1.2.1.1' = '_separate_partition /tmp'
+    '1.1.2.1.2' = '_mount_option /tmp nodev'
+    '1.1.2.1.3' = '_mount_option /tmp nosuid'
+    '1.1.2.2.1' = '_separate_partition /dev/shm'
+    '1.1.2.2.2' = '_mount_option /dev/shm nodev'
+    '1.1.2.2.3' = '_mount_option /dev/shm nosuid'
+
+    # ----- 2.1 Time synchronisation -------------------------------------------
+    '2.1.1' = '_pkg_installed chrony'
+    '2.1.2' = '_unit_enabled chronyd.service'
+
+    # ----- 2.2 Special-purpose services not installed -------------------------
+    '2.2.1'  = '_pkg_not_installed xinetd'
+    '2.2.2'  = '_pkg_not_installed xorg-x11-server-common'
+    '2.2.3'  = '_pkg_not_installed avahi'
+    '2.2.4'  = '_pkg_not_installed cups'
+    '2.2.5'  = '_pkg_not_installed dhcp-server'
+    '2.2.6'  = '_pkg_not_installed bind'
+    '2.2.7'  = '_pkg_not_installed ftp'
+    '2.2.8'  = '_pkg_not_installed vsftpd'
+    '2.2.9'  = '_pkg_not_installed tftp-server'
+    '2.2.10' = @'
+# 2.2.10 Ensure a web server is not installed
+ok=1; fails=""
+for p in httpd nginx; do if rpm -q "$p" >/dev/null 2>&1; then ok=0; fails="$fails $p"; fi; done
+if [ $ok -eq 1 ]; then echo PASS; else echo "FAIL: web server packages installed:$fails"; fi
+'@
+    '2.2.11' = @'
+# 2.2.11 Ensure IMAP and POP3 server is not installed
+ok=1; fails=""
+for p in dovecot cyrus-imapd; do if rpm -q "$p" >/dev/null 2>&1; then ok=0; fails="$fails $p"; fi; done
+if [ $ok -eq 1 ]; then echo PASS; else echo "FAIL:$fails"; fi
+'@
+    '2.2.12' = '_pkg_not_installed samba'
+    '2.2.13' = '_pkg_not_installed squid'
+    '2.2.14' = @'
+# 2.2.14 Ensure net-snmp is not installed or snmpd service is not enabled
+if ! rpm -q net-snmp >/dev/null 2>&1; then echo PASS; exit 0; fi
+_unit_not_in_use snmpd.service
+'@
+    '2.2.15' = '_pkg_not_installed ypserv'
+    '2.2.16' = '_pkg_not_installed telnet-server'
+    '2.2.18' = @'
+# 2.2.18 Ensure nfs-utils is not installed or nfs-server service is masked
+if ! rpm -q nfs-utils >/dev/null 2>&1; then echo PASS; exit 0; fi
+_unit_not_in_use nfs-server.service
+'@
+    '2.2.19' = @'
+# 2.2.19 Ensure rsync-daemon is not installed or rsyncd service is masked
+if ! rpm -q rsync-daemon >/dev/null 2>&1 && ! rpm -q rsync >/dev/null 2>&1; then echo PASS; exit 0; fi
+_unit_not_in_use rsyncd.service
+'@
+
+    # ----- 2.3 Service clients not installed ----------------------------------
+    '2.3.1' = '_pkg_not_installed ypbind'
+    '2.3.2' = '_pkg_not_installed rsh'
+    '2.3.3' = '_pkg_not_installed talk'
+    '2.3.4' = '_pkg_not_installed telnet'
+    '2.3.5' = '_pkg_not_installed openldap-clients'
+    '2.3.6' = '_pkg_not_installed tftp'
+
+    # ----- 3.1 Network kernel parameters --------------------------------------
+    '3.1.1'  = '_sysctl_check net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.default.send_redirects=0'
+    '3.1.2'  = '_sysctl_check net.ipv4.icmp_ignore_bogus_error_responses=1'
+    '3.1.3'  = '_sysctl_check net.ipv4.icmp_echo_ignore_broadcasts=1'
+    '3.1.4'  = '_sysctl_check net.ipv4.conf.all.accept_redirects=0 net.ipv4.conf.default.accept_redirects=0 net.ipv6.conf.all.accept_redirects=0 net.ipv6.conf.default.accept_redirects=0'
+    '3.1.5'  = '_sysctl_check net.ipv4.conf.all.secure_redirects=0 net.ipv4.conf.default.secure_redirects=0'
+    '3.1.6'  = '_sysctl_check net.ipv4.conf.all.rp_filter=1 net.ipv4.conf.default.rp_filter=1'
+    '3.1.7'  = '_sysctl_check net.ipv4.conf.all.accept_source_route=0 net.ipv4.conf.default.accept_source_route=0 net.ipv6.conf.all.accept_source_route=0 net.ipv6.conf.default.accept_source_route=0'
+    '3.1.8'  = '_sysctl_check net.ipv4.conf.all.log_martians=1 net.ipv4.conf.default.log_martians=1'
+    '3.1.9'  = '_sysctl_check net.ipv4.tcp_syncookies=1'
+    '3.1.10' = '_sysctl_check net.ipv6.conf.all.accept_ra=0 net.ipv6.conf.default.accept_ra=0'
+
+    # ----- 4.1 Host based firewall packages -----------------------------------
+    '4.1.1' = '_pkg_installed iptables'
+    '4.1.2' = @'
+# 4.1.2 Ensure nftables is not in use
+if ! rpm -q nftables >/dev/null 2>&1; then echo PASS; exit 0; fi
+_unit_not_in_use nftables.service
+'@
+    '4.1.3' = @'
+# 4.1.3 Ensure firewalld is not in use
+if ! rpm -q firewalld >/dev/null 2>&1; then echo PASS; exit 0; fi
+_unit_not_in_use firewalld.service
+'@
+
+    # ----- 5.1 Cron / at ------------------------------------------------------
+    '5.1.1' = '_unit_enabled crond.service'
+    '5.1.2' = '_stat_check /etc/crontab "600 root root" "700 root root"'
+    '5.1.3' = '_stat_check /etc/cron.hourly  "700 root root"'
+    '5.1.4' = '_stat_check /etc/cron.daily   "700 root root"'
+    '5.1.5' = '_stat_check /etc/cron.weekly  "700 root root"'
+    '5.1.6' = '_stat_check /etc/cron.monthly "700 root root"'
+    '5.1.7' = '_stat_check /etc/cron.d       "700 root root"'
+
+    # ----- 5.2 SSH server config ----------------------------------------------
+    '5.2.1'  = '_stat_check /etc/ssh/sshd_config "600 root root"'
+    '5.2.10' = '_sshd_check hostbasedauthentication no'
+    '5.2.11' = '_sshd_check ignorerhosts yes'
+    '5.2.17' = '_sshd_check permitemptypasswords no'
+    '5.2.18' = '_sshd_check permitrootlogin no'
+    '5.2.19' = '_sshd_check permituserenvironment no'
+    '5.2.20' = '_sshd_check usepam yes'
+
+    # ----- 5.3 Sudo -----------------------------------------------------------
+    '5.3.1' = '_pkg_installed sudo'
+
+    # ----- 7.1 File permissions on /etc identity files ------------------------
+    '7.1.1'  = '_stat_check /etc/passwd            "644 root root"'
+    '7.1.2'  = '_stat_check /etc/passwd-           "644 root root" "600 root root"'
+    '7.1.3'  = '_stat_check /etc/group             "644 root root"'
+    '7.1.4'  = '_stat_check /etc/group-            "644 root root" "600 root root"'
+    '7.1.5'  = '_stat_check /etc/shadow            "0 root root" "0 root shadow"'
+    '7.1.6'  = '_stat_check /etc/shadow-           "0 root root" "0 root shadow"'
+    '7.1.7'  = '_stat_check /etc/gshadow           "0 root root" "0 root shadow"'
+    '7.1.8'  = '_stat_check /etc/gshadow-          "0 root root" "0 root shadow"'
+    '7.1.9'  = '_stat_check /etc/shells            "644 root root"'
+    '7.1.10' = '_stat_check /etc/security/opasswd  "600 root root"'
 }
 
 # ===============================================================================
@@ -3982,25 +4252,66 @@ esac done < <(stat -Lc ''%#a %U %G'' "$l_hdfile") done < <(find "$l_home" -xdev 
 #  RUNNER
 # ===============================================================================
 function Invoke-CisItems {
-    Write-Banner "CIS AKS items (all MANL - operator runs Audit on node)"
+    $autoCount = ($Script:Evaluators.Keys).Count
+    Write-Banner ("CIS AKS items - {0} with on-node evaluators, {1} MANL" -f $autoCount, ($Script:CIS_ITEMS.Count - $autoCount))
     Write-Host "  Count: $($Script:CIS_ITEMS.Count) items" -ForegroundColor Gray
     foreach ($it in $Script:CIS_ITEMS) {
         Write-CheckHeader $it.Section ("({0}/{1}) {2}" -f $it.Level, $it.Kind, $it.Title)
-        Write-Manl ("CIS Audit / Remediation procedure follows.  Run on the node.")
+
+        $hasEval  = $Script:Evaluators.ContainsKey($it.Section)
+        $captured = @{}
+        if ($RunOnNodes -and $Script:NodeOutputs.Count -gt 0) {
+            foreach ($node in $Script:NodeOutputs.Keys) {
+                $cap = $Script:NodeOutputs[$node][$it.Section]
+                if ($cap) { $captured[$node] = $cap.Trim() }
+            }
+        }
+
+        # If we have an evaluator AND captured per-node output, aggregate to PASS / FAIL.
+        if ($hasEval -and $captured.Count -gt 0) {
+            $passes = @(); $fails = @(); $skips = @(); $unknown = @()
+            foreach ($node in $captured.Keys) {
+                $line = ($captured[$node] -split "`r?`n" | Where-Object { $_ -match '^(PASS|FAIL|SKIP)' } | Select-Object -First 1)
+                if (-not $line) { $unknown += $node; continue }
+                if     ($line -match '^PASS')      { $passes += $node }
+                elseif ($line -match '^FAIL[: ](.*)') { $fails += "${node}: $($matches[1].Trim())" }
+                elseif ($line -match '^SKIP[: ](.*)') { $skips += "${node}: $($matches[1].Trim())" }
+                else                                  { $unknown += "${node}: $line" }
+            }
+            if ($fails.Count -gt 0) {
+                $detail = "[$($it.Level)/$($it.Kind)] " + ($fails -join ' | ')
+                if ($passes.Count -gt 0) { $detail += " || passes: " + ($passes -join ', ') }
+                Write-Fail ("{0} fail(s) across {1} node(s): {2}" -f $fails.Count, $captured.Count, ($fails -join '; '))
+                Add-Result $it.Section $it.Title "FAIL" $detail
+            }
+            elseif ($passes.Count -gt 0 -and $unknown.Count -eq 0) {
+                $detail = "[$($it.Level)/$($it.Kind)] PASS on $($passes.Count)/$($captured.Count) node(s)"
+                if ($skips.Count -gt 0) { $detail += " || skipped: " + ($skips -join '; ') }
+                Write-Pass ("on {0} node(s)" -f $passes.Count)
+                Add-Result $it.Section $it.Title "PASS" $detail
+            }
+            elseif ($skips.Count -gt 0 -and $passes.Count -eq 0 -and $fails.Count -eq 0) {
+                $detail = "[$($it.Level)/$($it.Kind)] SKIP: " + ($skips -join '; ')
+                Write-Skip ($skips -join '; ')
+                Add-Result $it.Section $it.Title "SKIP" $detail
+            }
+            else {
+                $detail = "[$($it.Level)/$($it.Kind)] indeterminate: " + ($unknown -join '; ')
+                Write-Warn "indeterminate evaluator output"
+                Add-Result $it.Section $it.Title "WARN" $detail
+            }
+            continue
+        }
+
+        # No evaluator: print CIS audit text, status MANL.
+        Write-Manl "No on-node evaluator (CIS Audit / Remediation printed below for human review)."
         Write-Info "Audit:"
         foreach ($ln in ($it.Audit -split "`n")) { if ($ln.Trim()) { Write-Info "  $ln" } }
         Write-Info "Remediation:"
         foreach ($ln in ($it.Remediation -split "`n")) { if ($ln.Trim()) { Write-Info "  $ln" } }
-
         $detail = "[$($it.Level)/$($it.Kind)] CIS Audit and Remediation - see Detail. Run on node host OS (Azure Linux 3)."
-        # When -RunOnNodes was supplied, attach captured per-node evidence
-        if ($RunOnNodes -and $Script:NodeOutputs.Count -gt 0) {
-            foreach ($node in $Script:NodeOutputs.Keys) {
-                $cap = $Script:NodeOutputs[$node][$it.Section]
-                if ($cap) {
-                    $detail += " || [NODE:$node] $cap"
-                }
-            }
+        if ($captured.Count -gt 0) {
+            foreach ($node in $captured.Keys) { $detail += " || [NODE:$node] $($captured[$node])" }
         }
         Add-Result $it.Section $it.Title "MANL" $detail
     }
