@@ -1239,7 +1239,7 @@ function Check-MANL-4_3 {
 #  SUMMARY
 # ===============================================================================
 function Show-Summary {
-    $total  = $Script:PassCount + $Script:FailCount + $Script:WarnCount + $Script:ManlCount
+    $total  = $Script:Results.Count
     $line92 = "=" * 92
     Write-Host ""
     Write-Host $line92 -ForegroundColor Cyan
@@ -1253,6 +1253,7 @@ function Show-Summary {
     Write-Host ("  {0,-8} {1,-50} {2,-6} {3}" -f ("-"*8),("-"*50),("-"*6),("-"*8))
 
     $autoCounts = @{ PASS=0; FAIL=0; WARN=0; NA=0; UNKNOWN=0 }
+    $unknownRows = @()
     foreach ($r in $Script:Results) {
         $col = switch ($r.Status) { "PASS"{"Green"} "FAIL"{"Red"} "MANL"{"Cyan"} default{"Magenta"} }
         $t   = if ($r.Title.Length -gt 50) { $r.Title.Substring(0,47) + "..." } else { $r.Title }
@@ -1267,25 +1268,53 @@ function Show-Summary {
             $detailNoTag = $r.Detail -replace '^\[AUTO:[^\]]+\]\s*',''
             Write-Host ("           $detailNoTag") -ForegroundColor DarkGray
         }
+        if ($auto -eq 'UNKNOWN') { $unknownRows += $r }
     }
 
     Write-Host ""
     Write-Host $line92 -ForegroundColor Cyan
-    Write-Host ("  Checks run : {0,4}" -f $total)
-    if ($total -gt 0) {
-        Write-Host ("  PASS       : {0,4}  ({1:P0})" -f $Script:PassCount, ($Script:PassCount / $total)) -ForegroundColor Green
-        Write-Host ("  FAIL       : {0,4}  ({1:P0})" -f $Script:FailCount, ($Script:FailCount / $total)) -ForegroundColor Red
-        Write-Host ("  WARN       : {0,4}  ({1:P0})" -f $Script:WarnCount, ($Script:WarnCount / $total)) -ForegroundColor Magenta
-        Write-Host ("  MANL       : {0,4}  ({1:P0})" -f $Script:ManlCount, ($Script:ManlCount / $total)) -ForegroundColor Cyan
+    Write-Host ("  Items in report : {0,4}" -f $total)
+    Write-Host ""
+    Write-Host "  CSV Status counts (CIS classification):" -ForegroundColor Yellow
+    $statusGroup = $Script:Results | Group-Object Status
+    foreach ($g in $statusGroup) {
+        $sc = switch ($g.Name) { 'PASS'{'Green'} 'FAIL'{'Red'} 'MANL'{'Cyan'} 'WARN'{'Magenta'} default{'Gray'} }
+        Write-Host ("    {0,-6} : {1,4}" -f $g.Name, $g.Count) -ForegroundColor $sc
     }
     Write-Host ""
-    Write-Host "  Automated verdicts (within MANL items):" -ForegroundColor Yellow
-    Write-Host ("    AUTO PASS    : {0,4}" -f $autoCounts.PASS)    -ForegroundColor Green
-    Write-Host ("    AUTO FAIL    : {0,4}" -f $autoCounts.FAIL)    -ForegroundColor Red
-    Write-Host ("    AUTO N/A     : {0,4}" -f $autoCounts.NA)      -ForegroundColor DarkGray
-    Write-Host ("    AUTO UNKNOWN : {0,4}" -f $autoCounts.UNKNOWN) -ForegroundColor Yellow
+    Write-Host "  AUTO verdict counts (automated assessment, all rows are MANL by CIS):" -ForegroundColor Yellow
+    Write-Host ("    PASS    : {0,4}" -f $autoCounts.PASS)    -ForegroundColor Green
+    Write-Host ("    FAIL    : {0,4}" -f $autoCounts.FAIL)    -ForegroundColor Red
+    Write-Host ("    N/A     : {0,4}" -f $autoCounts.NA)      -ForegroundColor DarkGray
+    Write-Host ("    UNKNOWN : {0,4}" -f $autoCounts.UNKNOWN) -ForegroundColor Yellow
     Write-Host $line92 -ForegroundColor Cyan
     Write-Host ""
+
+    # Why-UNKNOWN diagnosis: classify each UNKNOWN row by root cause so the
+    # operator can see at a glance which ones are fixable vs review-only.
+    if ($unknownRows.Count -gt 0) {
+        Write-Host "  Why AUTO=UNKNOWN ($($unknownRows.Count) item$(if($unknownRows.Count -ne 1){'s'})):" -ForegroundColor Yellow
+        # Review-only items (no automated signal exists, by design)
+        $reviewOnly = @('1.3','2.2','3.2','4.1','4.3')
+        foreach ($r in $unknownRows) {
+            $detail = $r.Detail -replace '^\[AUTO:[^\]]+\]\s*',''
+            $cause  = ''
+            $hint   = ''
+            if     ($r.Section -eq '3.1')                                    { $cause = 'API does not expose CMK state'; $hint = 'Verify in: Power Platform Admin Center > env > Settings > Encryption > Data encryption.' }
+            elseif ($detail -match 'Graph not connected')                    { $cause = 'Graph not connected';            $hint = 'Re-run after fixing Graph permissions / network connectivity.' }
+            elseif ($detail -match 'BAP API not connected')                  { $cause = 'BAP not connected';              $hint = 'Re-run with -RegisterAsPowerAppMgmtApp or run: Add-PowerAppsAccount; New-PowerAppManagementApp -ApplicationId <appId>.' }
+            elseif ($detail -match 'BAP API unavailable')                    { $cause = 'BAP endpoint failed';            $hint = 'SP probably not registered. Run: Add-PowerAppsAccount; New-PowerAppManagementApp -ApplicationId <appId>.' }
+            elseif ($detail -match 'no Dataverse-backed environments')       { $cause = 'No Dataverse envs (N/A misclassified)'; $hint = 'Should not happen - report a bug.' }
+            elseif ($detail -match 'Dataverse Web API unavailable')          { $cause = 'Dataverse 401/403';              $hint = 'SP needs Application User + System Administrator in each env (Permissions helper STEP A + STEP B).' }
+            elseif ($detail -match 'Could not query CA policies')            { $cause = 'Graph CA query failed';          $hint = 'Verify Policy.Read.All grant + Entra ID P1 / P2 license.' }
+            elseif ($detail -match 'Could not query admins')                 { $cause = 'Graph role query failed';        $hint = 'Verify RoleManagement.Read.All grant.' }
+            elseif ($r.Section -in $reviewOnly)                              { $cause = 'Review-only item';               $hint = 'No PASS/FAIL signal possible via API - human review required.' }
+            else                                                             { $cause = 'Other';                          $hint = 'See Detail column for specifics.' }
+            Write-Host ("    {0,-5} {1}" -f $r.Section, $cause) -ForegroundColor Yellow
+            Write-Host ("           -> $hint") -ForegroundColor DarkGray
+        }
+        Write-Host ""
+    }
 
     Write-Host "  Connection status:" -ForegroundColor Yellow
     $g = if ($Script:GraphConnected) { "[OK] Connected"   } else { "[--] Not connected" }
