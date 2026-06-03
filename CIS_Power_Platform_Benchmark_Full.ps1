@@ -143,8 +143,19 @@ function Invoke-Check {
     Write-CheckHeader $Section $Title
     try { & $Body }
     catch {
-        Write-Warn "Unexpected error: $($_.Exception.Message)"
-        Add-Result $Section $Title "WARN" "Error: $($_.Exception.Message)"
+        $ex      = $_.Exception
+        $full    = $ex.Message
+        $type    = $ex.GetType().FullName
+        $where   = "$($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber)"
+        # Display the raw PowerShell error (multi-line, with type and location)
+        # so the operator sees the same thing they would see at the prompt.
+        Write-Warn "Unexpected error in [$Section]: $type"
+        foreach ($line in ($full -split [char]10)) {
+            if ($line.Trim()) { Write-Host "      $line" -ForegroundColor Magenta }
+        }
+        Write-Host "      at $where" -ForegroundColor DarkMagenta
+        $Script:LastErrors["Check $Section"] = "$type @ $where :: $full"
+        Add-Result $Section $Title "WARN" "Error: $type @ $where :: $full"
     }
 }
 
@@ -295,7 +306,7 @@ function Get-AllEnvironments {
             }
         } catch {
             $lastErr = $_.Exception.Message.Split([char]10)[0]
-            $Script:LastErrors["BAP env-list api-version=$ver"] = $lastErr
+            $Script:LastErrors["BAP env-list api-version=$ver"] = $_.Exception.Message
             continue
         }
     }
@@ -421,7 +432,7 @@ function Invoke-DataverseApi {
         }
         $Script:DataverseStatus[$InstanceUrl] = $status
         $shortMsg = $msg.Split([char]10)[0]
-        $Script:LastErrors["DV:$EnvName"] = "HTTP $status - $shortMsg"
+        $Script:LastErrors["DV:$EnvName"] = "HTTP $status - $msg"
         if ($status -eq 401 -or $msg -match 'Unauthorized|401') {
             Write-Info "    [$EnvName] Dataverse 401: SP is not registered as an Application User in this environment."
             Write-Info "    Fix once per env (TWO steps):"
@@ -1369,8 +1380,12 @@ function Show-Summary {
     if ($Script:LastErrors -and $Script:LastErrors.Count -gt 0) {
         Write-Host "  Captured raw errors ($($Script:LastErrors.Count)):" -ForegroundColor Yellow
         foreach ($k in $Script:LastErrors.Keys) {
-            $v = $Script:LastErrors[$k]
-            Write-Host ("    {0,-32} : {1}" -f $k, $v) -ForegroundColor DarkGray
+            $v = [string]$Script:LastErrors[$k]
+            Write-Host ("    [{0}]" -f $k) -ForegroundColor Yellow
+            foreach ($line in ($v -split [char]10)) {
+                $trim = $line.TrimEnd([char]13)
+                if ($trim) { Write-Host ("        {0}" -f $trim) -ForegroundColor DarkGray }
+            }
         }
         Write-Host ""
     }
