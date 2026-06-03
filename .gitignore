@@ -1,3 +1,4 @@
 CIS_*_Results_*.csv
 CIS_M365_Permissions_Output.json
 CIS_Azure_Permissions_Output.json
+CIS_PowerPlatform_Permissions_Output.json

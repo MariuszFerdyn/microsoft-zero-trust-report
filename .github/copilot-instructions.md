@@ -38,6 +38,33 @@ include that item as a `MANL`-status check**, alongside the Automated checks.
 - Wire new MANL checks into the `SECTION MANL` banner block at the bottom of
   the main script.
 
+#### Power Platform exception
+
+`CIS_Power_Platform_Benchmark_Full.ps1` further refines this rule: every CIS
+Power Platform item is classified Manual, so a strict "everything is MANL"
+output is not actionable. For that script:
+
+- Function naming and structure stay the same (`Check-MANL-<section>`,
+  function-level Audit + Remediation + References, etc.).
+- Use the `Add-MANL` helper (not `Add-Result`) and pass an automated verdict
+  (`PASS`, `FAIL`, `WARN`, `NA`, `UNKNOWN`). The helper maps the verdict to a
+  CSV `Status`:
+
+  | Verdict   | Status |
+  |-----------|--------|
+  | PASS      | PASS   |
+  | FAIL      | FAIL   |
+  | WARN      | WARN   |
+  | NA        | SKIP   |
+  | UNKNOWN   | MANL   |
+
+  Items only emit `Status = MANL` when the script genuinely cannot derive a
+  PASS/FAIL/SKIP from the API (i.e. CIS-mandated human review).
+- The raw verdict is always preserved in the `Detail` column as an `[AUTO: x]`
+  prefix, so downstream consumers can still group by automated assessment.
+- The CSV schema (`Section, Title, Status, Detail` / `PASS|FAIL|WARN|SKIP|MANL`)
+  is unchanged.
+
 ### 2. Update README when behavior or coverage changes
 
 If a change alters user-visible behavior (new checks, new parameters, new

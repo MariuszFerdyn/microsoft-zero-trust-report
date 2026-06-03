@@ -8,12 +8,20 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 |-----------|---------|------------------:|--------------:|--------|--------------------|
 | CIS Microsoft Azure Foundations | v5.0.0 | 103 | 62 | `CIS_Azure_Benchmark_Full.ps1` | `CIS_Azure_Permissions.ps1` |
 | CIS Microsoft 365 Foundations | v6.0.1 | 129 | 11 | `CIS_M365_Benchmark_Full.ps1` | `CIS_M365_Permissions.ps1` |
+| CIS Microsoft Dynamics 365 / Power Platform Foundations | v1.0.0 | 16¹ | 16 | `CIS_Power_Platform_Benchmark_Full.ps1` | `CIS_Power_Platform_Permissions.ps1` |
 
 > **Manual (MANL) checks** cover CIS items that cannot be fully verified via
 > API. The scripts still surface them in a dedicated `SECTION MANL` block,
 > print the portal path, audit steps, and remediation, and — where possible —
 > pull diagnostic context from Graph / Exchange / Teams to help the operator
 > answer the item. MANL results are recorded in the CSV with `Status = MANL`.
+>
+> ¹ **Power Platform note:** all 16 items are classified Manual by CIS, but
+> `CIS_Power_Platform_Benchmark_Full.ps1` derives an automated verdict from the
+> BAP / Graph / Dataverse APIs wherever possible and promotes that verdict to
+> the row's `Status` (PASS / FAIL / SKIP). Only items that genuinely require
+> human review (no API signal) keep `Status = MANL`. The raw automated verdict
+> is always preserved in the `Detail` column as an `[AUTO: ...]` prefix.
 
 ---
 
@@ -175,6 +183,123 @@ The script configures:
 ```
 
 Results are saved to a timestamped CSV file: `CIS_M365_Results_<date>.csv`
+
+---
+
+## 3 — CIS Microsoft Dynamics 365 / Power Platform Foundations Benchmark v1.0.0
+
+### Sections Covered
+
+| Section | Area | Checks |
+|---------|------|-------:|
+| 1 | Accounts and Authentication | 4 manual |
+| 2 | Permissions | 5 manual |
+| 3 | Data Management | 4 manual |
+| 4 | Logging and Auditing | 3 manual |
+
+> All 16 recommendations in the CIS Power Platform benchmark are classified
+> **Manual** by CIS. The script runs each as a `Check-MANL-<section>`
+> function that prints the portal path, audit steps, remediation, and
+> references, and — where APIs allow — pulls live diagnostic context from
+> Microsoft Graph (admin accounts, Conditional Access policies for MFA
+> and location restrictions), the Power Platform BAP API
+> (environments, tenant settings, DLP policies, tenant isolation), and
+> the Dataverse Web API (per-environment session timeouts, blocked
+> attachments, public queues, security roles, audit flags).
+>
+> **Note on Dataverse:** items 1.2, 2.3, 3.2, 3.3, 4.1, and 4.2 audit
+> settings that only exist *inside* a Dataverse environment (Dynamics 365
+> apps, model-driven apps). Power Apps canvas-only or Power Automate-only
+> environments don't have those settings at all — the benchmark reports
+> them as Not Applicable for those envs. There is no non-Dataverse
+> alternative for these specific items because they are Dynamics 365 /
+> Dataverse features by definition. Dataverse-driven checks require the
+> service principal to be added as an Application User with the System
+> Administrator role in each environment. Before that you must also
+> self-elevate your own account to Dataverse System Administrator in the
+> environment (Power Platform Admin Center → **Manage** → **Environments**
+> → pick env → **Membership** → **Add me**). The permissions helper prints
+> step-by-step instructions for both steps.
+>
+> **Status mapping:** unlike the Azure and M365 benchmarks (where every
+> Manual CIS item is reported as `Status = MANL`), the Power Platform script
+> promotes the automated verdict to the CSV `Status`:
+> `PASS → PASS`, `FAIL → FAIL`, `WARN → WARN`, `N/A → SKIP`,
+> `UNKNOWN → MANL`. Items appear as `MANL` only when the script could not
+> derive a definitive verdict from the APIs and human review is genuinely
+> required. The raw verdict is always written to the `Detail` column with an
+> `[AUTO: ...]` prefix so consumers can still aggregate by automated
+> assessment.
+
+### Prerequisites
+
+- **Azure CLI (`az`)** — required by `CIS_Power_Platform_Permissions.ps1`
+  to create the App Registration, Service Principal, secret, Graph permission
+  grants, and the **Power Platform Administrator** directory role assignment.
+- **PowerShell modules:**
+
+```powershell
+Install-Module Microsoft.Graph                                  -Scope CurrentUser -Force
+Install-Module Microsoft.PowerApps.Administration.PowerShell    -Scope CurrentUser -Force
+```
+
+> The Power Platform BAP API only accepts service-principal tokens AFTER
+> the SP has been registered as a Power Platform Management App. This is
+> a one-time interactive step that an admin must perform:
+>
+> ```powershell
+> Add-PowerAppsAccount
+> New-PowerAppManagementApp -ApplicationId '<app-id>'
+> ```
+>
+> `CIS_Power_Platform_Permissions.ps1 -RegisterAsPowerAppMgmtApp` will do
+> this for you (it prompts for the interactive admin sign-in). If you skip
+> this step, the benchmark still runs, but the BAP-driven enrichment for
+> sections 1.1, 2.1, 2.5, 3.1, 3.4, 4.1, 4.2 is skipped and those MANL
+> checks fall back to CIS guidance only.
+
+### Permissions Setup
+
+```powershell
+.\CIS_Power_Platform_Permissions.ps1 -TenantId "<tenant-guid>" -RegisterAsPowerAppMgmtApp
+```
+
+Options:
+- `-AppName "CIS-PowerPlatform-Benchmark-Audit"` — custom app registration name
+- `-AppId "<existing-app-guid>"` — reuse an existing app registration
+- `-NoSecret` — skip client-secret creation (by default every run mints a fresh secret)
+- `-SkipDirectoryRoles` — skip the Power Platform Administrator role assignment
+- `-RegisterAsPowerAppMgmtApp` — also call `New-PowerAppManagementApp` (interactive)
+- `-AutoLogin` — auto-login if Azure CLI is signed into a different tenant
+
+The script configures:
+- **Microsoft Graph (Application)**: Directory.Read.All, User.Read.All, Group.Read.All, RoleManagement.Read.All, Organization.Read.All, Policy.Read.All, AuditLog.Read.All
+- **Entra Directory Role**: Power Platform Administrator (falls back to Dynamics 365 Administrator if unavailable)
+- **Power Platform**: Management App registration (with `-RegisterAsPowerAppMgmtApp`)
+
+### Running the Audit
+
+**Service-principal (non-interactive):**
+
+```powershell
+.\CIS_Power_Platform_Benchmark_Full.ps1 `
+    -TenantId     "<tenant-guid>" `
+    -AppId        "<app-id>" `
+    -AppSecret    "<secret>" `
+    -TenantDomain "<tenant>.onmicrosoft.com"
+```
+
+**Graph-only mode** (skip Power Platform BAP API enrichment):
+
+```powershell
+.\CIS_Power_Platform_Benchmark_Full.ps1 `
+    -TenantId  "<tenant-guid>" `
+    -AppId     "<app-id>" `
+    -AppSecret "<secret>" `
+    -GraphOnlyMode
+```
+
+Results are saved to a timestamped CSV file: `CIS_PowerPlatform_Results_<date>.csv`
 
 ---
 
