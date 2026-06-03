@@ -84,6 +84,10 @@ $Script:TenantSettings = $null
 $Script:DataverseTokens = @{}
 # Cache of Dataverse readiness per env (so we don't print "App User not registered" once per check)
 $Script:DataverseStatus = @{}
+# Captured root-cause errors keyed by source ('BAP', 'Graph:<endpoint>',
+# 'DV:<envName>', 'TenantSettings'). Surfaced verbatim by Show-Summary so the
+# operator can see exactly why an automated verdict came out as UNKNOWN.
+$Script:LastErrors = [ordered]@{}
 
 # ===============================================================================
 #  HELPERS
@@ -280,14 +284,22 @@ function Get-AllEnvironments {
             }
         } catch {
             $lastErr = $_.Exception.Message.Split([char]10)[0]
+            $Script:LastErrors["BAP env-list api-version=$ver"] = $lastErr
             continue
         }
     }
     Write-Info "  BAP env enumeration failed on all api-versions. Last error: $lastErr"
     Write-Info "  Most common cause: SP not registered. Run once interactively as a PP admin:"
     Write-Info "    Add-PowerAppsAccount; New-PowerAppManagementApp -ApplicationId <appId>"
+    if ($lastErr) { $Script:LastErrors['BAP'] = $lastErr }
     $Script:Environments = @()
     return @()
+}
+
+function Get-BapErrorHint {
+    $err = $Script:LastErrors['BAP']
+    if (-not $err) { $err = 'no BAP error captured (BAP may not be connected)' }
+    return $err
 }
 
 function Get-DataverseFallbackDetail {
@@ -295,7 +307,15 @@ function Get-DataverseFallbackDetail {
     if ($EnvCount -eq 0) {
         return "Not Applicable - no Dataverse-backed environments in the tenant (item only applies to Dynamics 365 / Dataverse environments)."
     } else {
-        return "Dataverse Web API unavailable for all $EnvCount candidate env(s) (SP not registered as App User, or missing Dataverse role) - manual review required."
+        # Surface the actual per-env error(s) so the operator can see if it
+        # was a 401 (SP not added as App User) vs 403 (missing privilege) vs
+        # network/TLS error vs throttling.
+        $dvErrors = @()
+        foreach ($k in $Script:LastErrors.Keys) {
+            if ($k -like 'DV:*') { $dvErrors += "$($k.Substring(3))=$($Script:LastErrors[$k])" }
+        }
+        $errSummary = if ($dvErrors.Count -gt 0) { ' [' + ($dvErrors -join '; ') + ']' } else { '' }
+        return "Dataverse Web API unavailable for all $EnvCount candidate env(s) (SP not registered as App User, or missing Dataverse role) - manual review required.$errSummary"
     }
 }
 
@@ -384,6 +404,8 @@ function Invoke-DataverseApi {
             try { $status = [int]$_.Exception.Response.StatusCode } catch { }
         }
         $Script:DataverseStatus[$InstanceUrl] = $status
+        $shortMsg = $msg.Split([char]10)[0]
+        $Script:LastErrors["DV:$EnvName"] = "HTTP $status - $shortMsg"
         if ($status -eq 401 -or $msg -match 'Unauthorized|401') {
             Write-Info "    [$EnvName] Dataverse 401: SP is not registered as an Application User in this environment."
             Write-Info "    Fix once per env (TWO steps):"
@@ -409,7 +431,9 @@ function Get-PPTenantSettings {
         $Script:TenantSettings = $resp
         return $resp
     } catch {
-        Write-Info "  Could not read tenant settings: $($_.Exception.Message.Split([char]10)[0])"
+        $msg = $_.Exception.Message.Split([char]10)[0]
+        Write-Info "  Could not read tenant settings: $msg"
+        $Script:LastErrors['TenantSettings'] = $msg
         return $null
     }
 }
@@ -464,7 +488,7 @@ function Check-MANL-1_1 {
             Add-MANL "1.1" "User access to environments controlled with Security Groups" $verdict $detail
         } else {
             Write-Manl "Could not enumerate environments via BAP API - verify in the Power Platform Admin Center."
-            Add-MANL "1.1" "User access to environments controlled with Security Groups" 'UNKNOWN' "BAP API unavailable - manual review required."
+            Add-MANL "1.1" "User access to environments controlled with Security Groups" 'UNKNOWN' "BAP API unavailable - $(Get-BapErrorHint)"
         }
     }
 }
@@ -584,8 +608,10 @@ function Check-MANL-1_3 {
                 Write-Manl "Verify each listed admin has a separate admin-only account."
                 Add-MANL "1.3" "Administrative accounts separate / unassigned / cloud-only" 'UNKNOWN' $detail
             } catch {
-                Write-Manl "Could not enumerate admin accounts: $($_.Exception.Message)"
-                Add-MANL "1.3" "Administrative accounts separate / unassigned / cloud-only" 'UNKNOWN' "Could not query admins - manual review required."
+                $emsg = $_.Exception.Message.Split([char]10)[0]
+                $Script:LastErrors['Graph:directoryRoles'] = $emsg
+                Write-Manl "Could not enumerate admin accounts: $emsg"
+                Add-MANL "1.3" "Administrative accounts separate / unassigned / cloud-only" 'UNKNOWN' "Could not query admins via Graph - $emsg"
             }
         } else {
             Write-Manl "Graph not connected - verify in the M365 Admin Center."
@@ -636,8 +662,10 @@ function Check-MANL-1_4 {
                 }
                 Write-Manl "Verify scope (Power Platform / Dataverse cloud apps) and break-glass exclusions in the Entra portal."
             } catch {
-                Write-Manl "Could not read CA policies (need Policy.Read.All / Entra ID P1+): $($_.Exception.Message)"
-                Add-MANL "1.4" "MFA for all users is enabled (CA)" 'UNKNOWN' "Could not query CA policies - manual review required."
+                $emsg = $_.Exception.Message.Split([char]10)[0]
+                $Script:LastErrors['Graph:CAPolicies(1.4)'] = $emsg
+                Write-Manl "Could not read CA policies (need Policy.Read.All / Entra ID P1+): $emsg"
+                Add-MANL "1.4" "MFA for all users is enabled (CA)" 'UNKNOWN' "Could not query CA policies via Graph - $emsg"
             }
         } else {
             Write-Manl "Graph not connected - verify in the Entra portal."
@@ -688,7 +716,7 @@ function Check-MANL-2_1 {
             }
         } else {
             Write-Manl "Could not read tenant settings via BAP API - verify in the Power Platform Admin Center."
-            Add-MANL "2.1" "Env creation restricted to admins" 'UNKNOWN' "BAP API unavailable - manual review required."
+            Add-MANL "2.1" "Env creation restricted to admins" 'UNKNOWN' "BAP API unavailable - $(Get-BapErrorHint)"
         }
     }
 }
@@ -815,8 +843,10 @@ function Check-MANL-2_4 {
                 }
                 Write-Manl "Verify the location list and excluded users in the Entra portal."
             } catch {
-                Write-Manl "Could not read CA policies: $($_.Exception.Message)"
-                Add-MANL "2.4" "Access restricted by location (CA)" 'UNKNOWN' "Could not query CA policies - manual review required."
+                $emsg = $_.Exception.Message.Split([char]10)[0]
+                $Script:LastErrors['Graph:CAPolicies(2.4)'] = $emsg
+                Write-Manl "Could not read CA policies: $emsg"
+                Add-MANL "2.4" "Access restricted by location (CA)" 'UNKNOWN' "Could not query CA policies via Graph - $emsg"
             }
         } else {
             Write-Manl "Graph not connected - verify in the Entra portal."
@@ -878,7 +908,7 @@ function Check-MANL-2_5 {
                 Write-Manl "Verify the allow-list and direction in the Power Platform Admin Center."
             } else {
                 Write-Manl "Could not read tenant isolation policy via BAP API (tried crossTenantAccessPolicy and tenantIsolationPolicy)."
-                Add-MANL "2.5" "Cross-tenant isolation enabled" 'UNKNOWN' "BAP API unavailable - manual review required."
+                Add-MANL "2.5" "Cross-tenant isolation enabled" 'UNKNOWN' "BAP API unavailable - $(Get-BapErrorHint)"
             }
         } else {
             Write-Manl "BAP API not connected - verify in the Power Platform Admin Center."
@@ -926,7 +956,7 @@ function Check-MANL-3_1 {
             Add-MANL "3.1" "Critical-data environments use CMK" 'UNKNOWN' $detail
         } else {
             Write-Manl "Could not enumerate environments - verify in the admin center."
-            Add-MANL "3.1" "Critical-data environments use CMK" 'UNKNOWN' "BAP API unavailable - manual review required."
+            Add-MANL "3.1" "Critical-data environments use CMK" 'UNKNOWN' "BAP API unavailable - $(Get-BapErrorHint)"
         }
     }
 }
@@ -1081,7 +1111,7 @@ function Check-MANL-3_4 {
                 Write-Manl "Verify connector categorization and scope in the admin center."
             } catch {
                 Write-Manl "Could not read DLP policies via BAP API: $($_.Exception.Message.Split([char]10)[0])"
-                Add-MANL "3.4" "DLP policies enabled and restrict connectors" 'UNKNOWN' "BAP API unavailable - manual review required."
+                Add-MANL "3.4" "DLP policies enabled and restrict connectors" 'UNKNOWN' "BAP API unavailable - $(Get-BapErrorHint)"
             }
         } else {
             Write-Manl "BAP API not connected - verify in the Power Platform Admin Center."
@@ -1301,17 +1331,30 @@ function Show-Summary {
             $cause  = ''
             $hint   = ''
             if     ($r.Section -eq '3.1')                                    { $cause = 'API does not expose CMK state'; $hint = 'Verify in: Power Platform Admin Center > env > Settings > Encryption > Data encryption.' }
-            elseif ($detail -match 'Graph not connected')                    { $cause = 'Graph not connected';            $hint = 'Re-run after fixing Graph permissions / network connectivity.' }
+            elseif ($detail -match 'Graph not connected')                    { $cause = 'Graph not connected';            $hint = 'Re-run after Connect-MgGraph succeeds (check app permissions and admin consent).' }
             elseif ($detail -match 'BAP API not connected')                  { $cause = 'BAP not connected';              $hint = 'Re-run with -RegisterAsPowerAppMgmtApp or run: Add-PowerAppsAccount; New-PowerAppManagementApp -ApplicationId <appId>.' }
             elseif ($detail -match 'BAP API unavailable')                    { $cause = 'BAP endpoint failed';            $hint = 'SP probably not registered. Run: Add-PowerAppsAccount; New-PowerAppManagementApp -ApplicationId <appId>.' }
-            elseif ($detail -match 'no Dataverse-backed environments')       { $cause = 'No Dataverse envs (N/A misclassified)'; $hint = 'Should not happen - report a bug.' }
+            elseif ($detail -match 'no Dataverse-backed environments')       { $cause = 'No Dataverse envs (verdict should be N/A)'; $hint = 'If verdict is UNKNOWN here, the BAP env list returned an env without instanceApiUrl that is still being audited - report a bug.' }
             elseif ($detail -match 'Dataverse Web API unavailable')          { $cause = 'Dataverse 401/403';              $hint = 'SP needs Application User + System Administrator in each env (Permissions helper STEP A + STEP B).' }
             elseif ($detail -match 'Could not query CA policies')            { $cause = 'Graph CA query failed';          $hint = 'Verify Policy.Read.All grant + Entra ID P1 / P2 license.' }
             elseif ($detail -match 'Could not query admins')                 { $cause = 'Graph role query failed';        $hint = 'Verify RoleManagement.Read.All grant.' }
             elseif ($r.Section -in $reviewOnly)                              { $cause = 'Review-only item';               $hint = 'No PASS/FAIL signal possible via API - human review required.' }
             else                                                             { $cause = 'Other';                          $hint = 'See Detail column for specifics.' }
             Write-Host ("    {0,-5} {1}" -f $r.Section, $cause) -ForegroundColor Yellow
-            Write-Host ("           -> $hint") -ForegroundColor DarkGray
+            Write-Host ("           detail: $detail") -ForegroundColor DarkGray
+            Write-Host ("           hint  : $hint")   -ForegroundColor DarkGray
+        }
+        Write-Host ""
+    }
+
+    # Captured raw errors (HTTP responses, exception messages) keyed by source.
+    # Useful to copy-paste into a bug report or to spot tenant-specific issues
+    # like throttling, missing consent, or expired tokens.
+    if ($Script:LastErrors -and $Script:LastErrors.Count -gt 0) {
+        Write-Host "  Captured raw errors ($($Script:LastErrors.Count)):" -ForegroundColor Yellow
+        foreach ($k in $Script:LastErrors.Keys) {
+            $v = $Script:LastErrors[$k]
+            Write-Host ("    {0,-32} : {1}" -f $k, $v) -ForegroundColor DarkGray
         }
         Write-Host ""
     }
