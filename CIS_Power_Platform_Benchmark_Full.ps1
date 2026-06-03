@@ -566,13 +566,22 @@ function Check-MANL-1_2 {
         foreach ($e in $envs) {
             $envType = $e.properties.environmentSku
             $name    = $e.properties.displayName
-            if ($envType -notin @('Production','Sandbox','Trial')) { continue }
+            if ($envType -notin @('Production','Sandbox','Trial','Default')) { continue }  # include Default - CIS does not exempt it from these audits
             $url = Get-EnvInstanceUrl $e
             if (-not $url) { continue }
-            $sel = 'sessiontimeoutenabled,sessiontimeoutinminutes,sessiontimeoutreminderinminutes,inactivitytimeoutenabled,inactivitytimeoutinminutes,inactivitytimeoutreminderinminutes'
-            $org = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "organizations?`$select=$sel"
+            # The session/inactivity timeout columns only exist on Dataverse
+            # orgs that include the customer-engagement schema. Some Default /
+            # canvas-only orgs return HTTP 400 on `$select` for those columns,
+            # so query the full organization row and pick fields if present.
+            $org = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "organizations"
             if ($null -eq $org) { continue }
             $o = @($org.value)[0]
+            if ($null -eq $o) { continue }
+            $hasSesCol = ($o.PSObject.Properties.Name -contains 'sessiontimeoutenabled')
+            if (-not $hasSesCol) {
+                Write-Info "    [$name] organization entity has no session-timeout columns (likely a non-D365 env); marking N/A."
+                continue
+            }
             $rows += [PSCustomObject]@{
                 Env     = $name
                 SesOn   = $o.sessiontimeoutenabled
@@ -816,7 +825,7 @@ function Check-MANL-2_3 {
         foreach ($e in $envs) {
             $envType = $e.properties.environmentSku
             $name    = $e.properties.displayName
-            if ($envType -notin @('Production','Sandbox','Trial')) { continue }
+            if ($envType -notin @('Production','Sandbox','Trial','Default')) { continue }  # include Default - CIS does not exempt it from these audits
             $url = Get-EnvInstanceUrl $e
             if (-not $url) { continue }
             $org = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "organizations?`$select=blockedattachments"
@@ -1040,7 +1049,7 @@ function Check-MANL-3_2 {
         foreach ($e in $envs) {
             $envType = $e.properties.environmentSku
             $name    = $e.properties.displayName
-            if ($envType -notin @('Production','Sandbox','Trial')) { continue }
+            if ($envType -notin @('Production','Sandbox','Trial','Default')) { continue }  # include Default - CIS does not exempt it from these audits
             $url = Get-EnvInstanceUrl $e
             if (-not $url) { continue }
             $filter = ($privacyPrivs | ForEach-Object { "name eq '$_'" }) -join ' or '
@@ -1092,7 +1101,7 @@ function Check-MANL-3_3 {
         foreach ($e in $envs) {
             $envType = $e.properties.environmentSku
             $name    = $e.properties.displayName
-            if ($envType -notin @('Production','Sandbox','Trial')) { continue }
+            if ($envType -notin @('Production','Sandbox','Trial','Default')) { continue }  # include Default - CIS does not exempt it from these audits
             $url = Get-EnvInstanceUrl $e
             if (-not $url) { continue }
             $q = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "queues?`$select=name,emailaddress,incomingemaildeliverymethod,queueviewtype&`$filter=queueviewtype eq 0"
@@ -1199,7 +1208,7 @@ function Check-MANL-4_1 {
         foreach ($e in $envs) {
             $envType = $e.properties.environmentSku
             $name    = $e.properties.displayName
-            if ($envType -notin @('Production','Sandbox','Trial')) { continue }
+            if ($envType -notin @('Production','Sandbox','Trial','Default')) { continue }  # include Default - CIS does not exempt it from these audits
             $url = Get-EnvInstanceUrl $e
             if (-not $url) { continue }
             $r = Invoke-DataverseApi -InstanceUrl $url -EnvName $name -Path "roles?`$select=roleid,name&`$filter=name eq 'System Administrator'"
@@ -1261,7 +1270,7 @@ function Check-MANL-4_2 {
         foreach ($e in $envs) {
             $envType = $e.properties.environmentSku
             $name    = $e.properties.displayName
-            if ($envType -notin @('Production','Sandbox','Trial')) { continue }
+            if ($envType -notin @('Production','Sandbox','Trial','Default')) { continue }  # include Default - CIS does not exempt it from these audits
             $url = Get-EnvInstanceUrl $e
             if (-not $url) { continue }
             $sel = 'isauditenabled,isuseraccessauditenabled,isreadauditenabled,auditretentionperiodv2'
