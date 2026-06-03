@@ -195,8 +195,21 @@ Results are saved to a timestamped CSV file: `CIS_M365_Results_<date>.csv`
 > function that prints the portal path, audit steps, remediation, and
 > references, and — where APIs allow — pulls live diagnostic context from
 > Microsoft Graph (admin accounts, Conditional Access policies for MFA
-> and location restrictions) and from the Power Platform BAP API
-> (environments, tenant settings, DLP policies, tenant isolation).
+> and location restrictions), the Power Platform BAP API
+> (environments, tenant settings, DLP policies, tenant isolation), and
+> the Dataverse Web API (per-environment session timeouts, blocked
+> attachments, public queues, security roles, audit flags).
+>
+> **Note on Dataverse:** items 1.2, 2.3, 3.2, 3.3, 4.1, and 4.2 audit
+> settings that only exist *inside* a Dataverse environment (Dynamics 365
+> apps, model-driven apps). Power Apps canvas-only or Power Automate-only
+> environments don't have those settings at all — the benchmark reports
+> them as Not Applicable for those envs. There is no non-Dataverse
+> alternative for these specific items because they are Dynamics 365 /
+> Dataverse features by definition. Dataverse-driven checks require the
+> service principal to be added as an Application User with the System
+> Administrator role in each environment (the permissions helper prints
+> step-by-step instructions for this).
 
 ### Prerequisites
 

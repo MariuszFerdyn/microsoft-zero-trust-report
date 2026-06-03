@@ -17,6 +17,17 @@
     for environments, tenant settings, DLP policies, etc.) so the operator
     can answer the item without leaving the console.
 
+    Several CIS items (1.2 session timeouts, 2.3 blocked attachments,
+    3.2 privacy privileges, 3.3 public queues, 4.1 System Administrator
+    role membership, 4.2 audit flags) audit settings that *only exist
+    inside a Dataverse environment*. There is no non-Dataverse
+    alternative for those settings - Power Apps canvas-only or
+    Power Automate-only environments simply do not have a "session
+    timeout" column or a "System Administrator" security role. For
+    those environments the script reports those items as
+    Not Applicable; for Dataverse-backed environments it calls the
+    Dataverse Web API directly.
+
     Auth model (mirrors CIS_M365_Benchmark_Full.ps1):
         - App-only via client credentials.
         - Microsoft Graph: connected with Connect-MgGraph -ClientSecretCredential
@@ -251,6 +262,42 @@ function Get-AllEnvironments {
     }
 }
 
+function Get-DataverseFallbackDetail {
+    param([int]$EnvCount)
+    if ($EnvCount -eq 0) {
+        return "Not Applicable - no Dataverse-backed environments in the tenant (item only applies to Dynamics 365 / Dataverse environments)."
+    } else {
+        return "Dataverse Web API unavailable for all $EnvCount candidate env(s) (SP not registered as App User, or missing Dataverse role) - manual review required."
+    }
+}
+
+# Helper: split environments into Dataverse-backed vs non-Dataverse and emit a
+# one-line summary. Items 1.2 / 2.3 / 3.2 / 3.3 / 4.1 / 4.2 audit *Dataverse*
+# settings (organization columns, security roles, queues), so envs without a
+# linked Dataverse instance (canvas-apps-only / Flow-only) are Not Applicable
+# for those checks - the underlying setting simply does not exist.
+function Get-DataverseEnvironments {
+    param([string]$ContextLabel = 'Dataverse audit')
+    $all = Get-AllEnvironments
+    $inScope    = @()
+    $noDv       = @()
+    $excludedSku = @()
+    foreach ($e in $all) {
+        $sku  = $e.properties.environmentSku
+        $name = $e.properties.displayName
+        if ($sku -notin @('Production','Sandbox','Trial','Default')) {
+            $excludedSku += "$name [$sku]"
+            continue
+        }
+        $url = Get-EnvInstanceUrl $e
+        if (-not $url) { $noDv += "$name [$sku]"; continue }
+        $inScope += $e
+    }
+    Write-Info "$ContextLabel scope: $($inScope.Count) Dataverse env(s); $($noDv.Count) without Dataverse (N/A); $($excludedSku.Count) excluded SKU."
+    if ($noDv.Count -gt 0) { Write-Info "  Skipped (no Dataverse): $($noDv -join '; ')" }
+    return $inScope
+}
+
 # Helper: extract per-environment instance URL (https://orgxxx.crm.dynamics.com)
 function Get-EnvInstanceUrl {
     param([object]$Env)
@@ -411,7 +458,7 @@ function Check-MANL-1_2 {
             )
 
         # Automated audit: Dataverse organization entity (session + inactivity timeout columns)
-        $envs = Get-AllEnvironments
+        $envs = Get-DataverseEnvironments -ContextLabel "1.2 session timeouts"
         $rows = @()
         foreach ($e in $envs) {
             $envType = $e.properties.environmentSku
@@ -443,7 +490,7 @@ function Check-MANL-1_2 {
             $detail = "Envs queried=$($rows.Count); non-compliant=$($bad.Count): $($bad -join '; ')"
             Add-Result "1.2" "User sessions terminated on time limit / logoff" "MANL" $detail
         } else {
-            Add-Result "1.2" "User sessions terminated on time limit / logoff" "MANL" "Dataverse Web API unavailable (SP not registered as App User?) - manual review required."
+            Add-Result "1.2" "User sessions terminated on time limit / logoff" "MANL" (Get-DataverseFallbackDetail $envs.Count)
         }
         Write-Manl "Verify the per-env values above against organizational policy."
     }
@@ -655,7 +702,7 @@ function Check-MANL-2_3 {
 
         # Automated audit: read blockedattachments from organization entity per env
         $cisDefault = @('ade','adp','app','asa','ashx','asmx','asp','bas','bat','cdx','cer','chm','class','cmd','com','config','cpl','crt','csh','dll','exe','fxp','hlp','hta','htr','htw','ida','idc','idq','inf','ins','isp','its','jar','js','jse','ksh','lnk','mad','maf','mag','mam','maq','mar','mas','mat','mau','mav','maw','mda','mdb','mde','mdt','mdw','mdz','msc','msh','msh1','msh2','mshxml','msh1xml','msh2xml','msi','msp','mst','ops','pcd','pif','plg','prf','prg','printer','pst','reg','rem','scf','scr','sct','shb','shs','shtm','shtml','soap','stm','svc','url','vb','vbe','vbs','vsmacros','vss','vst','vsw','ws','wsc','wsf','wsh')
-        $envs = Get-AllEnvironments
+        $envs = Get-DataverseEnvironments -ContextLabel "2.3 blocked attachments"
         $missing = @()
         $okEnvs  = 0
         foreach ($e in $envs) {
@@ -684,7 +731,7 @@ function Check-MANL-2_3 {
             if ($missing.Count -eq 0) { $detail = "Envs queried=$okEnvs; all envs cover CIS default block list." }
             Add-Result "2.3" "Blocked file extensions match enterprise block list" "MANL" $detail
         } else {
-            Add-Result "2.3" "Blocked file extensions match enterprise block list" "MANL" "Dataverse Web API unavailable - manual review required."
+            Add-Result "2.3" "Blocked file extensions match enterprise block list" "MANL" (Get-DataverseFallbackDetail $envs.Count)
         }
         Write-Manl "Verify the per-env extension list against the organizational block list."
     }
@@ -876,7 +923,7 @@ function Check-MANL-3_2 {
             'prvAllowQuickCampaign','prvUseExternalReader','prvDataExport',
             'prvPublishDuplicateDetectionRule'
         )
-        $envs = Get-AllEnvironments
+        $envs = Get-DataverseEnvironments -ContextLabel "3.2 privacy privileges"
         $envsOk = 0
         foreach ($e in $envs) {
             $envType = $e.properties.environmentSku
@@ -899,7 +946,7 @@ function Check-MANL-3_2 {
         if ($envsOk -gt 0) {
             Add-Result "3.2" "Extract customer data privileges controlled" "MANL" "Envs queried=$envsOk; review per-role privacy privilege counts above."
         } else {
-            Add-Result "3.2" "Extract customer data privileges controlled" "MANL" "Dataverse Web API unavailable - manual review required."
+            Add-Result "3.2" "Extract customer data privileges controlled" "MANL" (Get-DataverseFallbackDetail $envs.Count)
         }
         Write-Manl "Privacy-related privileges should be granted only to roles that strictly need them."
     }
@@ -927,7 +974,7 @@ function Check-MANL-3_3 {
         # OptionSet values: 0 None, 1 ServerSide, 2 MicrosoftDynamics365ForOutlook,
         # 3 EmailRouter, 4 ForwardMailbox. CIS-aligned values are 0 or 4.
         $methodMap = @{ 0='None'; 1='ServerSideSync'; 2='OutlookAddin'; 3='EmailRouter'; 4='ForwardMailbox' }
-        $envs = Get-AllEnvironments
+        $envs = Get-DataverseEnvironments -ContextLabel "3.3 public queue email"
         $bad = @()
         $okEnvs = 0
         foreach ($e in $envs) {
@@ -955,7 +1002,7 @@ function Check-MANL-3_3 {
                       else { "Envs queried=$okEnvs; non-compliant public queues=$($bad.Count): $($bad -join '; ')" }
             Add-Result "3.3" "Public-queue incoming email actions restricted" "MANL" $detail
         } else {
-            Add-Result "3.3" "Public-queue incoming email actions restricted" "MANL" "Dataverse Web API unavailable - manual review required."
+            Add-Result "3.3" "Public-queue incoming email actions restricted" "MANL" (Get-DataverseFallbackDetail $envs.Count)
         }
         Write-Manl "CIS-compliant incoming methods are 'None' (0) or 'Forward Mailbox' (4)."
     }
@@ -1033,7 +1080,7 @@ function Check-MANL-4_1 {
 
         # Automated audit: per env, find System Administrator role and enumerate
         # assigned systemusers (excluding disabled / application users).
-        $envs = Get-AllEnvironments
+        $envs = Get-DataverseEnvironments -ContextLabel "4.1 SysAdmin role"
         $totalAdmins = 0
         $envsOk = 0
         foreach ($e in $envs) {
@@ -1068,7 +1115,7 @@ function Check-MANL-4_1 {
         if ($envsOk -gt 0) {
             Add-Result "4.1" "System Administrator role changes reviewed" "MANL" "Envs queried=$envsOk; total admin assignments=$totalAdmins"
         } else {
-            Add-Result "4.1" "System Administrator role changes reviewed" "MANL" "Dataverse Web API unavailable - manual review required."
+            Add-Result "4.1" "System Administrator role changes reviewed" "MANL" (Get-DataverseFallbackDetail $envs.Count)
         }
         Write-Manl "Review the per-env System Administrator membership above and remove unauthorized users."
     }
@@ -1095,7 +1142,7 @@ function Check-MANL-4_2 {
             )
 
         # Automated audit: org entity audit flags
-        $envs = Get-AllEnvironments
+        $envs = Get-DataverseEnvironments -ContextLabel "4.2 audit flags"
         $bad = @()
         $okEnvs = 0
         foreach ($e in $envs) {
@@ -1123,7 +1170,7 @@ function Check-MANL-4_2 {
                       else { "Envs queried=$okEnvs; non-compliant=$($bad.Count): $($bad -join '; ')" }
             Add-Result "4.2" "Environment Activity logging enabled" "MANL" $detail
         } else {
-            Add-Result "4.2" "Environment Activity logging enabled" "MANL" "Dataverse Web API unavailable - manual review required."
+            Add-Result "4.2" "Environment Activity logging enabled" "MANL" (Get-DataverseFallbackDetail $envs.Count)
         }
         Write-Manl "All three audit flags (Start, Log Access, Read Logs) must be enabled per CIS."
     }
