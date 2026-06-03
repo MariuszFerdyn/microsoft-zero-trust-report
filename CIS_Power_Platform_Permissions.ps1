@@ -538,10 +538,11 @@ Write-Host "  STEP B - Add the service principal as an Application User:" -Foreg
 Write-Host "    1. Open the environment list:" -ForegroundColor Cyan
 Write-Host "         https://admin.powerplatform.microsoft.com/manage/environments/" -ForegroundColor Cyan
 Write-Host "       then click the target environment." -ForegroundColor Cyan
-Write-Host "    2. Settings > Users + permissions > Application users" -ForegroundColor Cyan
-Write-Host "    3. + New app user > Add an app > select '$AppName' ($AppId)" -ForegroundColor Cyan
-Write-Host "    4. Pick the appropriate Business unit > Create" -ForegroundColor Cyan
-Write-Host "    5. Open the new app user > Manage Roles > select System Administrator > Save" -ForegroundColor Cyan
+Write-Host "    2. Click Membership and 'Add me' (if you have not already self-elevated in STEP A)." -ForegroundColor Cyan
+Write-Host "    3. Settings > Users + permissions > Application users" -ForegroundColor Cyan
+Write-Host "    4. + New app user > Add an app > select '$AppName' ($AppId)" -ForegroundColor Cyan
+Write-Host "    5. Pick the appropriate Business unit > Create" -ForegroundColor Cyan
+Write-Host "    6. Open the new app user > Manage Roles > select System Administrator > Save" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  If STEP B shows: 'We couldn''t be able to fetch app users' / 403" -ForegroundColor DarkYellow
 Write-Host "  with 'missing prvReadApplicationUser privilege', it means STEP A was" -ForegroundColor DarkYellow
