@@ -65,6 +65,7 @@ param(
     [Parameter(Mandatory=$false)][string]$AppSecret,
     [Parameter(Mandatory=$false)][string]$TenantDomain,
     [switch]$GraphOnlyMode = $false,
+    [switch]$DebugDataverse = $false,
     [string]$OutputPath    = "$PSScriptRoot\CIS_PowerPlatform_Results_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 )
 
@@ -1429,6 +1430,120 @@ function Show-Summary {
 # ===============================================================================
 #  MAIN
 # ===============================================================================
+
+# Decode a JWT and return its payload as a PSCustomObject (best-effort, no
+# signature validation). Used by the Dataverse self-test to show exactly which
+# appid / oid / aud the SP token carries, since many "401 unauthorized" cases
+# are caused by a token issued for the wrong app or wrong audience.
+function Decode-Jwt {
+    param([string]$Jwt)
+    try {
+        $parts = $Jwt.Split('.')
+        if ($parts.Length -lt 2) { return $null }
+        $p = $parts[1].Replace('-','+').Replace('_','/')
+        switch ($p.Length % 4) { 2 { $p += '==' } 3 { $p += '=' } 0 {} default {} }
+        $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p))
+        return ($json | ConvertFrom-Json)
+    } catch { return $null }
+}
+
+function Invoke-DataverseSelfTest {
+    param([string]$InstanceUrl, [string]$EnvName)
+    Write-Banner "DATAVERSE SELF-TEST: $EnvName"
+    Write-Info "Target instance URL : $InstanceUrl"
+    Write-Info "Calling AppId       : $AppId"
+    Write-Info "Tenant              : $TenantId"
+
+    # 1) Acquire a Dataverse token and decode its claims so we can confirm
+    #    the SP identity, audience, and tenant.
+    $tok = $null
+    try {
+        $tok = Get-OAuthToken -Scope "$InstanceUrl/.default"
+    } catch {
+        Write-Host "  [FAIL] Could not acquire Dataverse token:" -ForegroundColor Red
+        Write-Host "         $($_.Exception.Message)" -ForegroundColor Red
+        $Script:LastErrors["SelfTest:token"] = $_.Exception.Message
+        return
+    }
+    Write-Host "  [OK] Token acquired (length=$($tok.Length))" -ForegroundColor Green
+    $claims = Decode-Jwt $tok
+    if ($claims) {
+        Write-Info "Token claims:"
+        Write-Info "  aud      = $($claims.aud)        (must equal target instance URL)"
+        Write-Info "  iss      = $($claims.iss)"
+        Write-Info "  tid      = $($claims.tid)        (must match -TenantId)"
+        Write-Info "  appid    = $($claims.appid)      (must match -AppId)"
+        Write-Info "  oid      = $($claims.oid)        (SP object id)"
+        Write-Info "  app_dn   = $($claims.app_displayname)"
+        Write-Info "  idtyp    = $($claims.idtyp)      (should be 'app' for SP token)"
+        if ($claims.roles) { Write-Info "  roles    = $($claims.roles -join ', ')" }
+        if ($claims.scp)   { Write-Info "  scp      = $($claims.scp)" }
+        # Sanity checks
+        if ($claims.appid -and $AppId -and ($claims.appid -ne $AppId)) {
+            Write-Host "  [WARN] appid in token does not match -AppId parameter!" -ForegroundColor Magenta
+        }
+        if ($claims.tid -and $TenantId -and ($claims.tid -ne $TenantId)) {
+            Write-Host "  [WARN] tid in token does not match -TenantId parameter!" -ForegroundColor Magenta
+        }
+        if ($claims.aud -and ($claims.aud.TrimEnd('/') -ne $InstanceUrl.TrimEnd('/'))) {
+            Write-Host "  [WARN] Token aud does not match instance URL (this would 401 every call)." -ForegroundColor Magenta
+        }
+    } else {
+        Write-Host "  [WARN] Token could not be decoded as a JWT." -ForegroundColor Magenta
+    }
+
+    # 2) Try WhoAmI - the simplest Dataverse endpoint - and dump full result.
+    $whoUrl = "$InstanceUrl/api/data/v9.2/WhoAmI"
+    Write-Info ""
+    Write-Info "GET $whoUrl"
+    try {
+        $headers = @{ Authorization = "Bearer $tok"; Accept = 'application/json'; 'OData-Version' = '4.0'; 'OData-MaxVersion' = '4.0' }
+        $resp = Invoke-RestMethod -Uri $whoUrl -Headers $headers -Method GET -ErrorAction Stop
+        Write-Host "  [OK] WhoAmI succeeded:" -ForegroundColor Green
+        Write-Info "    UserId         = $($resp.UserId)"
+        Write-Info "    BusinessUnitId = $($resp.BusinessUnitId)"
+        Write-Info "    OrganizationId = $($resp.OrganizationId)"
+        Write-Host "  -> SP IS registered as an Application User in this environment." -ForegroundColor Green
+    } catch {
+        $status = ''
+        if ($_.Exception.Response) { try { $status = [int]$_.Exception.Response.StatusCode } catch {} }
+        Write-Host "  [FAIL] WhoAmI failed (HTTP $status)" -ForegroundColor Red
+        $body = ''
+        try {
+            $stream = $_.Exception.Response.GetResponseStream()
+            if ($stream) {
+                $reader = New-Object System.IO.StreamReader($stream)
+                $body = $reader.ReadToEnd()
+                $reader.Close()
+            }
+        } catch {}
+        if ($body) {
+            Write-Host "  Response body:" -ForegroundColor Red
+            foreach ($line in ($body -split [char]10)) { if ($line.Trim()) { Write-Host "    $line" -ForegroundColor Red } }
+        } else {
+            Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
+        }
+        $Script:LastErrors["SelfTest:WhoAmI"] = "HTTP $status :: $body $($_.Exception.Message)"
+
+        # Diagnose
+        Write-Host ""
+        Write-Host "  Diagnosis:" -ForegroundColor Yellow
+        if ($status -eq 401) {
+            Write-Host "    HTTP 401 = the SP is NOT an Application User in this environment." -ForegroundColor Yellow
+            Write-Host "    Fix: Power Platform Admin Center > Environments > $EnvName > Settings >" -ForegroundColor Yellow
+            Write-Host "         Users + permissions > Application users > + New app user >" -ForegroundColor Yellow
+            Write-Host "         add the App with AppId $AppId, then assign 'System Administrator'." -ForegroundColor Yellow
+            Write-Host "    NOTE: Make sure you are looking at the SAME env shown above:" -ForegroundColor Yellow
+            Write-Host "          '$EnvName' / $InstanceUrl" -ForegroundColor Yellow
+        } elseif ($status -eq 403) {
+            Write-Host "    HTTP 403 = SP is registered but missing privileges. Open the App User" -ForegroundColor Yellow
+            Write-Host "    > Manage Roles > assign 'System Administrator' (or a role with the missing prv*)." -ForegroundColor Yellow
+        } else {
+            Write-Host "    Unexpected status $status. Check token aud, network/proxy, and tenant id." -ForegroundColor Yellow
+        }
+    }
+    Write-Host ""
+}
 $StartTime = Get-Date
 Clear-Host
 
@@ -1439,6 +1554,24 @@ Write-Host "|  16 recommendations - all Manual per CIS                          
 Write-Host "+==================================================================================+" -ForegroundColor Cyan
 
 Connect-AllServices
+
+if ($DebugDataverse) {
+    Write-Banner "DEBUG: DATAVERSE SELF-TEST (-DebugDataverse)"
+    $allEnvs = Get-AllEnvironments
+    if (@($allEnvs).Count -eq 0) {
+        Write-Host "  No environments returned from BAP - cannot self-test Dataverse." -ForegroundColor Red
+    } else {
+        foreach ($e in $allEnvs) {
+            $u = Get-EnvInstanceUrl $e
+            $name = $e.properties.displayName
+            if ($u) {
+                Invoke-DataverseSelfTest -InstanceUrl $u -EnvName $name
+            } else {
+                Write-Info "  Skipping '$name' [$($e.properties.environmentSku)]: no Dataverse instance attached."
+            }
+        }
+    }
+}
 
 Write-Banner "SECTION 1 - Accounts and Authentication"
 Check-MANL-1_1
