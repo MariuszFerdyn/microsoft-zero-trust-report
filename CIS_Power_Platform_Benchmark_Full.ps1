@@ -934,12 +934,30 @@ function Check-MANL-2_5 {
         if ($Script:BapConnected) {
             $resp = $null
             $tenantId = $TenantId
+            # Multiple endpoints have shipped over time; try newest first.
+            # Older endpoints 404 on most modern tenants, newer ones 404 on
+            # tenants that never opted in. Capture each failure so the user
+            # can see which endpoint actually returned what.
             $endpoints = @(
+                "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/tenantIsolationPolicy?api-version=2020-10-01",
                 "https://api.bap.microsoft.com/providers/PowerPlatform.Governance/v1/tenants/$tenantId/crossTenantAccessPolicy?api-version=2020-10-01",
                 "https://api.bap.microsoft.com/providers/PowerPlatform.Governance/v1/tenantIsolationPolicy?api-version=2020-10-01"
             )
+            $perEndpointErr = @()
             foreach ($u in $endpoints) {
-                try { $resp = Invoke-BapApi -Url $u; if ($resp) { break } } catch { }
+                try {
+                    $resp = Invoke-BapApi -Url $u
+                    if ($resp) { Write-Info "  Got response from: $u"; break }
+                } catch {
+                    $st = ''
+                    if ($_.Exception.Response) { try { $st = [int]$_.Exception.Response.StatusCode } catch {} }
+                    $em = $_.Exception.Message.Split([char]10)[0]
+                    $perEndpointErr += "$u -> HTTP $st ($em)"
+                }
+            }
+            if ($perEndpointErr.Count -gt 0 -and -not $resp) {
+                $Script:LastErrors['BAP:tenantIsolation'] = ($perEndpointErr -join ' | ')
+                foreach ($e in $perEndpointErr) { Write-Info "  $e" }
             }
             if ($resp) {
                 $enabled = $null
@@ -964,8 +982,9 @@ function Check-MANL-2_5 {
                 Add-MANL "2.5" "Cross-tenant isolation enabled" $verdict "Enabled=$enabled; allow-list count=$(@($allow).Count)"
                 Write-Manl "Verify the allow-list and direction in the Power Platform Admin Center."
             } else {
-                Write-Manl "Could not read tenant isolation policy via BAP API (tried crossTenantAccessPolicy and tenantIsolationPolicy)."
-                Add-MANL "2.5" "Cross-tenant isolation enabled" 'UNKNOWN' "BAP API unavailable - $(Get-BapErrorHint)"
+                Write-Manl "Could not read tenant isolation policy via BAP API (tried $($endpoints.Count) endpoints; see captured errors)."
+                $hint = if ($Script:LastErrors['BAP:tenantIsolation']) { $Script:LastErrors['BAP:tenantIsolation'] } else { Get-BapErrorHint }
+                Add-MANL "2.5" "Cross-tenant isolation enabled" 'UNKNOWN' "BAP tenantIsolation endpoints all failed - $hint"
             }
         } else {
             Write-Manl "BAP API not connected - verify in the Power Platform Admin Center."
