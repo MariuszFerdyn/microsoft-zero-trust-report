@@ -208,8 +208,11 @@ Results are saved to a timestamped CSV file: `CIS_M365_Results_<date>.csv`
 > alternative for these specific items because they are Dynamics 365 /
 > Dataverse features by definition. Dataverse-driven checks require the
 > service principal to be added as an Application User with the System
-> Administrator role in each environment (the permissions helper prints
-> step-by-step instructions for this).
+> Administrator role in each environment. Before that you must also
+> self-elevate your own account to Dataverse System Administrator in the
+> environment (Power Platform Admin Center → **Manage** → **Environments**
+> → pick env → **Membership** → **Add me**). The permissions helper prints
+> step-by-step instructions for both steps.
 
 ### Prerequisites
 
