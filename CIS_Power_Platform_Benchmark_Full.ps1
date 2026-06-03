@@ -280,7 +280,7 @@ function Invoke-BapApi {
 # SP isn't yet registered for newer schemas. Drops $expand options that can
 # 400/403 on tenants without the corresponding licenses.
 function Get-AllEnvironments {
-    if ($Script:Environments -and $Script:Environments.Count -gt 0) { return $Script:Environments }
+    if ($Script:Environments -and @($Script:Environments).Count -gt 0) { return ,$Script:Environments }
     if (-not $Script:BapConnected) {
         $Script:LastErrors['BAP'] = 'BAP not connected (no token acquired - check SP credentials and -RegisterAsPowerAppMgmtApp).'
         return @()
@@ -295,7 +295,14 @@ function Get-AllEnvironments {
             if ($resp -and $resp.value -and @($resp.value).Count -gt 0) {
                 $Script:Environments = @($resp.value)
                 if ($ver -ne $apiVersions[0]) { Write-Info "  Environments enumerated via fallback api-version=$ver." }
-                return $Script:Environments
+                Write-Info "  BAP returned $(@($Script:Environments).Count) environment(s):"
+                foreach ($e in $Script:Environments) {
+                    $u = $null
+                    try { $u = $e.properties.linkedEnvironmentMetadata.instanceApiUrl } catch {}
+                    $dv = if ($u) { "Dataverse=$u" } else { "Dataverse=NONE" }
+                    Write-Info "    - $($e.properties.displayName) [$($e.properties.environmentSku)] envId=$($e.name)  $dv"
+                }
+                return ,$Script:Environments
             } else {
                 # 200 OK but empty value array: SP authenticated to BAP but cannot
                 # see any environments. This is the SP-not-registered-with-PP-mgmt
@@ -368,9 +375,21 @@ function Get-DataverseEnvironments {
         if (-not $url) { $noDv += "$name [$sku]"; continue }
         $inScope += $e
     }
-    Write-Info "$ContextLabel scope: $($inScope.Count) Dataverse env(s); $($noDv.Count) without Dataverse (N/A); $($excludedSku.Count) excluded SKU."
-    if ($noDv.Count -gt 0) { Write-Info "  Skipped (no Dataverse): $($noDv -join '; ')" }
-    return $inScope
+    Write-Info "$ContextLabel scope: $(@($inScope).Count) Dataverse env(s); $(@($noDv).Count) without Dataverse (N/A); $(@($excludedSku).Count) excluded SKU."
+    if (@($noDv).Count -gt 0)       { Write-Info "  Skipped (no Dataverse): $($noDv -join '; ')" }
+    if (@($excludedSku).Count -gt 0){ Write-Info "  Excluded SKU: $($excludedSku -join '; ')" }
+    if (@($inScope).Count -gt 0) {
+        Write-Info "  Will query the following Dataverse env(s):"
+        foreach ($e in $inScope) {
+            $u = Get-EnvInstanceUrl $e
+            $eid = $e.name
+            Write-Info "    - $($e.properties.displayName) [$($e.properties.environmentSku)] envId=$eid  url=$u"
+        }
+        Write-Info "  Make sure the App User (System Administrator) was added in EACH of the env(s) above."
+    }
+    # Force the return value to be an array so callers in PS5.1 don't unbox
+    # to $null when only one element is present (then $envs.Count would lie).
+    return ,@($inScope)
 }
 
 # Helper: extract per-environment instance URL (https://orgxxx.crm.dynamics.com)
@@ -412,6 +431,7 @@ function Invoke-DataverseApi {
         [string]$EnvName = $InstanceUrl
     )
     $url = "$InstanceUrl/api/data/v9.2/$Path"
+    Write-Info "    [$EnvName] GET $url"
     try {
         $token   = Get-DataverseToken -InstanceUrl $InstanceUrl
         $headers = @{
