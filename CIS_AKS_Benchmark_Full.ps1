@@ -97,6 +97,7 @@ param(
     [Parameter(Mandatory=$false)][string]$NodeName,
     [switch]$RunOnNodes,
     [switch]$SkipOnNodeAudit,
+    [switch]$DiagnoseAudit,
     [string]$DebugImage = "mcr.microsoft.com/cbl-mariner/base/core:3.0",
     [string]$OutputPath = "$PSScriptRoot\CIS_AKS_Results_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 )
@@ -265,9 +266,27 @@ function Invoke-NodeAudit {
     # Encode script as base64 to avoid shell-quoting headaches.
     $bytes  = [System.Text.Encoding]::UTF8.GetBytes($Script)
     $b64    = [Convert]::ToBase64String($bytes)
-    $podCmd = "set -e; echo '$b64' | base64 -d > /tmp/cis_audit.sh; chmod +x /tmp/cis_audit.sh; chroot /host /bin/bash /proc/`$`$/root/tmp/cis_audit.sh 2>&1"
+    # Strategy: write the decoded script directly to /host/tmp (the node's
+    # real /tmp via the kubectl-debug host mount), then chroot into the host
+    # and run it.  Use a SINGLE-LINE podCmd with `;` between commands so
+    # Windows kubectl.exe argv serialization doesn't mangle embedded newlines.
+    # Build podCmd using single-quoted PS fragments + $b64 concat to avoid
+    # PowerShell trying to expand $PATH / $rc / $(...) inside the bash code.
+    $podCmd =
+        'set -o pipefail; ' +
+        'if ! command -v base64 >/dev/null 2>&1; then echo "DIAG: base64 not in PATH=$PATH" >&2; exit 90; fi; ' +
+        'if [ ! -d /host ]; then echo "DIAG: /host not mounted by kubectl debug" >&2; exit 91; fi; ' +
+        "echo '$b64' | base64 -d > /host/tmp/cis_audit.sh; " +
+        'chmod +x /host/tmp/cis_audit.sh; ' +
+        'echo "DIAG: wrote $(wc -c < /host/tmp/cis_audit.sh) bytes"; ' +
+        'chroot /host /bin/bash /tmp/cis_audit.sh; rc=$?; ' +
+        'echo "DIAG: harness exit=$rc"; ' +
+        'rm -f /host/tmp/cis_audit.sh 2>/dev/null; exit $rc'
     try {
-        $output = kubectl debug "node/$NodeName" --image=$DebugImage --quiet=true -- /bin/bash -c $podCmd 2>&1
+        # CRITICAL: kubectl debug defaults --attach=false when -i/-t is not
+        # set, which means the debug pod runs but its stdout is never
+        # captured.  Force --attach=true so we get the harness output.
+        $output = kubectl debug "node/$NodeName" --image=$DebugImage --attach=true --quiet=true -- /bin/bash -c $podCmd 2>&1
         return ($output | Out-String).Trim()
     } catch {
         return "ERROR: $($_.Exception.Message)"
@@ -4371,6 +4390,25 @@ function Invoke-OnNodeAudits {
             }
             $Script:NodeOutputs[$name] = $perItem
             Write-Host ("    captured {0} sections from {1}" -f $perItem.Count, $name) -ForegroundColor Gray
+            # Surface diagnostics whenever the on-node harness returned no
+            # section markers, or always when -DiagnoseAudit is supplied.
+            if ($perItem.Count -eq 0 -or $DiagnoseAudit) {
+                Write-Host "    --- raw kubectl debug output (first 60 lines) ---" -ForegroundColor Magenta
+                $rawLines = $output -split "`r?`n"
+                $rawLines | Select-Object -First 60 | ForEach-Object {
+                    Write-Host ("      " + $_) -ForegroundColor DarkGray
+                }
+                if ($rawLines.Count -gt 60) {
+                    Write-Host ("      ... ({0} more lines suppressed)" -f ($rawLines.Count - 60)) -ForegroundColor DarkGray
+                }
+                Write-Host "    --- end raw output ---" -ForegroundColor Magenta
+                # Persist the raw output next to the CSV so the operator can inspect it.
+                $rawPath = [System.IO.Path]::ChangeExtension($OutputPath, $null).TrimEnd('.') + "_node_${name}_raw.txt"
+                try {
+                    [System.IO.File]::WriteAllText($rawPath, ($output | Out-String))
+                    Write-Host ("    full raw output saved to: {0}" -f $rawPath) -ForegroundColor Gray
+                } catch { }
+            }
             Add-Result "PRE-DEBUG-$name" "kubectl debug node/$name" "PASS" ("captured {0} sections" -f $perItem.Count)
             $Script:PassCount++
         } catch {
