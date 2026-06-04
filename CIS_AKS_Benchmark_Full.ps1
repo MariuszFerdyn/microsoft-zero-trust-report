@@ -102,6 +102,8 @@ param(
     [string]$OutputPath = "$PSScriptRoot\CIS_AKS_Results_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 )
 
+Clear-Host
+
 # ===============================================================================
 #  RESULT TRACKING
 # ===============================================================================
