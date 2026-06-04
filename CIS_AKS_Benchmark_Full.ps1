@@ -260,46 +260,50 @@ function Invoke-NodeAudit {
         [Parameter(Mandatory=$true)][string]$NodeName,
         [Parameter(Mandatory=$true)][string]$Script
     )
-    # Normalize line endings to LF - PowerShell here-strings produce CRLF on
-    # Windows, but bash chokes on CR inside function bodies.
+    # Normalize line endings to LF.
     $Script = $Script -replace "`r`n","`n" -replace "`r","`n"
-    # Encode script as base64 to avoid shell-quoting headaches.
     $bytes  = [System.Text.Encoding]::UTF8.GetBytes($Script)
     $b64    = [Convert]::ToBase64String($bytes)
-    # Build podCmd using single-quoted PS fragments + $b64 concat to avoid
-    # PowerShell trying to expand $PATH / $rc / $(...) inside the bash code.
-    $podCmd =
+
+    # IMPORTANT: do NOT pass the audit script through argv.
+    # PowerShell's Start-Process -ArgumentList rebuilds the Windows
+    # command-line by space-joining and re-quoting, which corrupts long
+    # arguments full of single quotes / semicolons / redirects (we
+    # observed the entire 22KB bash payload getting truncated to just
+    # 'set'). Instead, pass a TINY wrapper through argv and stream the
+    # base64 payload through kubectl's stdin (-i).
+    $wrapper =
         'set -o pipefail; ' +
+        'cat > /tmp/cis_audit.b64; ' +
         'if ! command -v base64 >/dev/null 2>&1; then echo "DIAG: base64 not in PATH=$PATH" >&2; exit 90; fi; ' +
-        'if [ ! -d /host ]; then echo "DIAG: /host not mounted by kubectl debug" >&2; exit 91; fi; ' +
-        "echo '$b64' | base64 -d > /host/tmp/cis_audit.sh; " +
+        'if [ ! -d /host ]; then echo "DIAG: /host not mounted" >&2; exit 91; fi; ' +
+        'base64 -d < /tmp/cis_audit.b64 > /host/tmp/cis_audit.sh; ' +
+        'rm -f /tmp/cis_audit.b64; ' +
         'chmod +x /host/tmp/cis_audit.sh; ' +
         'echo "DIAG: wrote $(wc -c < /host/tmp/cis_audit.sh) bytes"; ' +
         'chroot /host /bin/bash /tmp/cis_audit.sh; rc=$?; ' +
         'echo "DIAG: harness exit=$rc"; ' +
         'rm -f /host/tmp/cis_audit.sh 2>/dev/null; exit $rc'
 
-    # Run kubectl as a background job so we can show progress and enforce a
-    # timeout.  kubectl debug attaches to the pod and waits for it to exit;
-    # if the image pull is slow or the pod won't schedule, we want feedback
-    # rather than an indefinite hang.
-    $img = $DebugImage
-    # Persist podCmd to a temp file and have kubectl read it as args via a
-    # batch wrapper.  Avoids passing a 20KB+ argument through Start-Job
-    # serialization and avoids any stdin-blocking on PowerShell's side.
+    $stdinFile = [System.IO.Path]::GetTempFileName()
+    [System.IO.File]::WriteAllText($stdinFile, $b64)
     $tmpOut = [System.IO.Path]::GetTempFileName()
     $tmpErr = [System.IO.Path]::GetTempFileName()
+
+    $img = $DebugImage
     $proc = Start-Process -FilePath "kubectl" `
         -ArgumentList @(
             "debug", "node/$NodeName",
             "--image=$img",
             "--image-pull-policy=IfNotPresent",
+            "-i",
             "--attach=true",
             "--quiet=true",
             "--",
-            "/bin/bash", "-c", $podCmd
+            "/bin/bash", "-c", $wrapper
         ) `
         -NoNewWindow -PassThru `
+        -RedirectStandardInput  $stdinFile `
         -RedirectStandardOutput $tmpOut `
         -RedirectStandardError  $tmpErr
 
@@ -310,22 +314,10 @@ function Invoke-NodeAudit {
         Start-Sleep -Seconds $tickSec
         $elapsed += $tickSec
         Write-Host ("    ... waiting on kubectl debug ({0}s elapsed)" -f $elapsed) -ForegroundColor DarkGray
-        # Surface live debug-pod status so the operator can see WHY it's
-        # stuck (ImagePullBackOff / ErrImagePull / Pending / etc.).
         try {
-            $podLine = & kubectl get pods --all-namespaces `
-                --field-selector "spec.nodeName=$NodeName" `
-                -o "jsonpath={range .items[?(@.metadata.generateName=='node-debugger-${NodeName}-')]}{.metadata.namespace}/{.metadata.name}\t{.status.phase}\t{range .status.containerStatuses[*]}{.state}{end}{`"\n`"}{end}" 2>$null
-            if ($podLine) {
-                foreach ($l in ($podLine -split "`r?`n" | Where-Object { $_ })) {
-                    Write-Host ("      pod-status: " + $l) -ForegroundColor DarkYellow
-                }
-            } else {
-                # Fallback: any pod on this node whose name contains 'debugger'
-                $any = & kubectl get pods --all-namespaces --field-selector "spec.nodeName=$NodeName" -o "jsonpath={range .items[*]}{.metadata.name}\t{.status.phase}\t{range .status.containerStatuses[*]}{.state.waiting.reason}{.state.waiting.message}{end}{`"\n`"}{end}" 2>$null
-                $debug = ($any -split "`r?`n") | Where-Object { $_ -match 'debugger' }
-                foreach ($l in $debug) { Write-Host ("      pod-status: " + $l) -ForegroundColor DarkYellow }
-            }
+            $any = & kubectl get pods --all-namespaces --field-selector "spec.nodeName=$NodeName" -o "jsonpath={range .items[*]}{.metadata.name}\t{.status.phase}\t{range .status.containerStatuses[*]}{.state.waiting.reason}{.state.waiting.message}{end}{`"\n`"}{end}" 2>$null
+            $debug = ($any -split "`r?`n") | Where-Object { $_ -match 'debugger' }
+            foreach ($l in $debug) { Write-Host ("      pod-status: " + $l) -ForegroundColor DarkYellow }
         } catch { }
         if ($elapsed -ge $timeoutSec) {
             Write-Host ("    [WARN] kubectl debug exceeded {0}s, killing process {1}" -f $timeoutSec, $proc.Id) -ForegroundColor Magenta
@@ -336,10 +328,29 @@ function Invoke-NodeAudit {
     $stdout = ""; $stderr = ""
     try { $stdout = Get-Content $tmpOut -Raw -ErrorAction SilentlyContinue } catch { }
     try { $stderr = Get-Content $tmpErr -Raw -ErrorAction SilentlyContinue } catch { }
-    Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue
+    Remove-Item $tmpOut, $tmpErr, $stdinFile -ErrorAction SilentlyContinue
     $output = ($stdout + "`n" + $stderr).Trim()
     if (-not $output) { $output = "ERROR: kubectl debug returned no output (timed out or pod failed to start)" }
     return $output
+}
+
+function Remove-StaleDebugPods {
+    param([string]$Node)
+    Write-Host "  Cleaning up stale node-debugger-* pods on $Node ..." -ForegroundColor DarkGray
+    try {
+        $names = & kubectl get pods --all-namespaces -o "jsonpath={range .items[?(@.spec.nodeName=='$Node')]}{.metadata.namespace}/{.metadata.name}{`"\n`"}{end}" 2>$null
+        $count = 0
+        foreach ($entry in ($names -split "`r?`n" | Where-Object { $_ -match '/node-debugger-' })) {
+            $parts = $entry -split '/'
+            if ($parts.Count -eq 2) {
+                & kubectl delete pod -n $parts[0] $parts[1] --ignore-not-found=true --grace-period=0 --force --wait=false 2>&1 | Out-Null
+                $count++
+            }
+        }
+        if ($count -gt 0) { Write-Host ("    deleted {0} stale debug pod(s)" -f $count) -ForegroundColor Gray }
+    } catch {
+        Write-Host ("    [WARN] cleanup failed: {0}" -f $_.Exception.Message) -ForegroundColor Magenta
+    }
 }
 
 function Build-AuditScript {
@@ -4422,6 +4433,7 @@ function Invoke-OnNodeAudits {
     foreach ($n in $targets) {
         $name = $n.metadata.name
         Write-Host "  Auditing node $name ..." -ForegroundColor Yellow
+        Remove-StaleDebugPods -Node $name
         try {
             $output = Invoke-NodeAudit -NodeName $name -Script $script
             $perItem = @{}
