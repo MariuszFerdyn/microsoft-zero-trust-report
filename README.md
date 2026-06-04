@@ -9,6 +9,7 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 | CIS Microsoft Azure Foundations | v5.0.0 | 103 | 62 | `CIS_Azure_Benchmark_Full.ps1` | `CIS_Azure_Permissions.ps1` |
 | CIS Microsoft 365 Foundations | v6.0.1 | 129 | 11 | `CIS_M365_Benchmark_Full.ps1` | `CIS_M365_Permissions.ps1` |
 | CIS Microsoft Dynamics 365 / Power Platform Foundations | v1.0.0 | 16¹ | 16 | `CIS_Power_Platform_Benchmark_Full.ps1` | `CIS_Power_Platform_Permissions.ps1` |
+| CIS AKS Optimized Azure Linux 3 | v1.0.0 | 136² | 5 | `CIS_AKS_Benchmark_Full.ps1` | _(none — operator's existing kubeconfig)_ |
 
 > **Manual (MANL) checks** cover CIS items that cannot be fully verified via
 > API. The scripts still surface them in a dedicated `SECTION MANL` block,
@@ -22,6 +23,20 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 > the row's `Status` (PASS / FAIL / SKIP). Only items that genuinely require
 > human review (no API signal) keep `Status = MANL`. The raw automated verdict
 > is always preserved in the `Detail` column as an `[AUTO: ...]` prefix.
+>
+> ² **AKS Azure Linux 3 note:** every item in the CIS AKS Optimized Azure
+> Linux 3 Benchmark is a Linux OS-level audit (kernel modules, partitions,
+> sysctl, SSH, PAM, auditd, file permissions). None can be evaluated
+> through Azure ARM, Microsoft Graph, or kubectl against managed-cluster
+> endpoints, so the script collects evidence by running a privileged
+> `kubectl debug node` pod (chrooted to `/host`) on each Ready node **by
+> default** (pass `-SkipOnNodeAudit` to disable). All **136 CIS items
+> classified Automated** in the benchmark ship with on-node evaluators
+> that derive a real PASS / FAIL / SKIP verdict from the captured host
+> output. The remaining **5 CIS Manual** items stay `Status = MANL`,
+> and still print the verbatim Audit and Remediation procedure in the
+> `Detail` column for human review together with the per-node captured
+> output.
 
 ---
 
@@ -300,6 +315,92 @@ The script configures:
 ```
 
 Results are saved to a timestamped CSV file: `CIS_PowerPlatform_Results_<date>.csv`
+
+---
+
+## 4 — CIS AKS Optimized Azure Linux 3 Benchmark v1.0.0
+
+### Sections Covered
+
+| Section | Area | Checks |
+|---------|------|-------:|
+| 1 | Initial Setup (filesystem, package management, process hardening, banners) | 25 |
+| 2 | Services (time sync, special-purpose services, service clients) | 27 |
+| 3 | Network (kernel parameters) | 10 |
+| 4 | Host Based Firewall (iptables / nftables / firewalld) | 3 |
+| 5 | Access, Authentication and Authorization (cron, SSH, sudo, PAM, accounts) | 44 |
+| 6 | Logging and Auditing (journald, rsyslog, auditd) | 11 |
+| 7 | System Maintenance (file permissions and user / group integrity) | 21 |
+
+> The benchmark targets the **node host OS** of AKS node pools running on
+> Azure Linux 3 (`osSKU = AzureLinux`). It does not audit the Kubernetes
+> control plane or workloads — it audits the nodes the way a host-OS CIS
+> Benchmark would, just delivered through the AKS managed surface.
+> Every recommendation is a Linux shell-based audit; the script collects
+> evidence from each node via `kubectl debug node` (privileged debug pod
+> chrooted to `/host`).
+
+### Prerequisites
+
+> **You must already be logged into the cluster, and `kubectl` must be
+> working against it before you run the benchmark.** The script does not
+> perform `az login` or `az aks get-credentials` for you — it assumes
+> you have a working kubeconfig (the current context must point at the
+> cluster you want to audit) and that `kubectl get nodes` succeeds.
+>
+> Quick check on Linux / WSL or Windows:
+>
+> ```bash
+> az account set --subscription "<sub-guid>"
+> az aks get-credentials --resource-group "<aks-rg>" --name "<aks-cluster-name>" --overwrite-existing
+> kubectl get nodes      # must return your node list with STATUS=Ready
+> ```
+
+- **Azure CLI (`az`)** — used to read cluster metadata (`az aks show`,
+  `az aks list`).
+- **`kubectl`** — used to list nodes and to launch the privileged debug
+  pods that perform the on-node audit. Kubernetes ≥ 1.23 is required for
+  `kubectl debug node`.
+- **Cluster permissions** — your current `kubectl` context needs to be
+  able to (a) `get` and `list` `nodes` and (b) create privileged pods
+  via `kubectl debug node` (i.e. cluster-admin equivalent). On AKS this
+  is typically granted via the **Azure Kubernetes Service RBAC Cluster
+  Admin** Azure role, but any kubeconfig with equivalent rights works.
+
+> **No SSH is used.** The script audits each node by launching a
+> privileged debug pod via `kubectl debug node/<name>` (the pod runs on
+> that node with `hostPID` / `hostNetwork` and chroots to `/host` to
+> read the host filesystem). The pod is ephemeral and is removed by
+> Kubernetes when the audit completes.
+
+> No Microsoft Graph permissions are required — the AKS benchmark does not
+> query Entra ID.
+
+### Running the Audit
+
+Once `kubectl get nodes` works against your cluster:
+
+```powershell
+.\CIS_AKS_Benchmark_Full.ps1 `
+    -SubscriptionId "<sub-guid>" `
+    -ResourceGroup  "<aks-rg>" `
+    -ClusterName    "<aks-cluster-name>"
+```
+
+By **default** the script launches a privileged `kubectl debug node` pod
+on each Ready node (chrooted to `/host`), runs the CIS audit commands,
+and aggregates per-node output into a real PASS / FAIL / SKIP verdict
+for the ~75 items that ship with on-node evaluators. The remaining ~66
+items stay `MANL` (CIS audit logic too item-specific to encode
+generically) — those rows still print the verbatim CIS Audit and
+Remediation procedure plus the captured per-node output for human
+review.
+
+Pass `-SkipOnNodeAudit` to disable the on-node harness (every item
+becomes `MANL`, no node evidence collected). The legacy `-RunOnNodes`
+switch is accepted as a no-op for backward compatibility.
+
+Results are saved to a timestamped CSV file: `CIS_AKS_Results_<date>.csv`
 
 ---
 
