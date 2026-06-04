@@ -211,8 +211,13 @@ function Connect-Cluster {
         Write-Host ("    pool {0,-12} osType={1,-7} osSKU={2,-14} mode={3} count={4}" -f $ap.name, $ap.osType, $sku, $ap.mode, $ap.count) -ForegroundColor DarkGray
     }
     if (-not $azureLinuxFound) {
-        Write-Host "  [WARN] No agent pool reports osSKU=AzureLinux/AzureLinux3.  This benchmark targets Azure Linux 3 only." -ForegroundColor Yellow
-        Add-Result "PRE-OSSKU" "Azure Linux 3 osSKU detected on at least one nodepool" "WARN" "No agent pool reports osSKU AzureLinux/AzureLinux3.  Findings may not apply."
+        Write-Host "  [WARN] No agent pool reports osSKU=AzureLinux/AzureLinux3." -ForegroundColor Yellow
+        Write-Host "         This benchmark is designed for Azure Linux 3, but the on-node audit" -ForegroundColor Yellow
+        Write-Host "         will run anyway on the detected node OS.  Most evaluators are generic" -ForegroundColor Yellow
+        Write-Host "         (kernel modules, sysctl, sshd, file modes) and apply to any Linux;" -ForegroundColor Yellow
+        Write-Host "         package-presence checks (2.2.x / 2.3.x) may yield FAIL/SKIP if package" -ForegroundColor Yellow
+        Write-Host "         names differ on the detected distro (e.g. Ubuntu vs Azure Linux)." -ForegroundColor Yellow
+        Add-Result "PRE-OSSKU" "Azure Linux 3 osSKU detected on at least one nodepool" "WARN" "No agent pool reports osSKU AzureLinux/AzureLinux3.  Auditing detected nodes anyway; some package-name checks may not match this distro."
         $Script:WarnCount++
     } else {
         Add-Result "PRE-OSSKU" "Azure Linux 3 osSKU detected on at least one nodepool" "PASS" "AzureLinux pool present."
@@ -287,24 +292,33 @@ function Build-AuditScript {
 # ---- helper functions --------------------------------------------------------
 _have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-# Pass if package is NOT installed (rpm-based: tdnf/dnf on Azure Linux).
+# Pass if package is NOT installed. Works on rpm (Azure Linux/Mariner) and
+# dpkg (Ubuntu) distros.
 _pkg_not_installed() {
     local p="$1"
-    if rpm -q "$p" >/dev/null 2>&1; then
+    if _have_cmd rpm && rpm -q "$p" >/dev/null 2>&1; then
         echo "FAIL: package '$p' is installed: $(rpm -q "$p" 2>&1)"
-    else
-        echo "PASS"
+        return
     fi
+    if _have_cmd dpkg-query && dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q '^install ok installed'; then
+        echo "FAIL: package '$p' is installed (dpkg)"
+        return
+    fi
+    echo "PASS"
 }
 
-# Pass if package IS installed.
+# Pass if package IS installed. Works on rpm and dpkg distros.
 _pkg_installed() {
     local p="$1"
-    if rpm -q "$p" >/dev/null 2>&1; then
+    if _have_cmd rpm && rpm -q "$p" >/dev/null 2>&1; then
         echo "PASS"
-    else
-        echo "FAIL: package '$p' is NOT installed"
+        return
     fi
+    if _have_cmd dpkg-query && dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q '^install ok installed'; then
+        echo "PASS"
+        return
+    fi
+    echo "FAIL: package '$p' is NOT installed"
 }
 
 # Pass if kernel module is not loaded AND is blacklisted/install-disabled.
@@ -496,12 +510,12 @@ _unit_not_in_use snmpd.service
     '2.2.16' = '_pkg_not_installed telnet-server'
     '2.2.18' = @'
 # 2.2.18 Ensure nfs-utils is not installed or nfs-server service is masked
-if ! rpm -q nfs-utils >/dev/null 2>&1; then echo PASS; exit 0; fi
+if [ "$(_pkg_not_installed nfs-utils)" = PASS ] && [ "$(_pkg_not_installed nfs-common)" = PASS ] && [ "$(_pkg_not_installed nfs-kernel-server)" = PASS ]; then echo PASS; exit 0; fi
 _unit_not_in_use nfs-server.service
 '@
     '2.2.19' = @'
 # 2.2.19 Ensure rsync-daemon is not installed or rsyncd service is masked
-if ! rpm -q rsync-daemon >/dev/null 2>&1 && ! rpm -q rsync >/dev/null 2>&1; then echo PASS; exit 0; fi
+if [ "$(_pkg_not_installed rsync-daemon)" = PASS ] && [ "$(_pkg_not_installed rsync)" = PASS ]; then echo PASS; exit 0; fi
 _unit_not_in_use rsyncd.service
 '@
 
