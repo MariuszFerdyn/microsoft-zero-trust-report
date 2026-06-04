@@ -265,32 +265,47 @@ function Invoke-NodeAudit {
     $bytes  = [System.Text.Encoding]::UTF8.GetBytes($Script)
     $b64    = [Convert]::ToBase64String($bytes)
 
-    # IMPORTANT: do NOT pass the audit script through argv.
-    # PowerShell's Start-Process -ArgumentList rebuilds the Windows
-    # command-line by space-joining and re-quoting, which corrupts long
-    # arguments full of single quotes / semicolons / redirects (we
-    # observed the entire 22KB bash payload getting truncated to just
-    # 'set'). Instead, pass a TINY wrapper through argv and stream the
-    # base64 payload through kubectl's stdin (-i).
-    $wrapper =
-        'set -o pipefail; ' +
-        'cat > /tmp/cis_audit.b64; ' +
-        'if ! command -v base64 >/dev/null 2>&1; then echo "DIAG: base64 not in PATH=$PATH" >&2; exit 90; fi; ' +
-        'if [ ! -d /host ]; then echo "DIAG: /host not mounted" >&2; exit 91; fi; ' +
-        'base64 -d < /tmp/cis_audit.b64 > /host/tmp/cis_audit.sh; ' +
-        'rm -f /tmp/cis_audit.b64; ' +
-        'chmod +x /host/tmp/cis_audit.sh; ' +
-        'echo "DIAG: wrote $(wc -c < /host/tmp/cis_audit.sh) bytes"; ' +
-        'chroot /host /bin/bash /tmp/cis_audit.sh; rc=$?; ' +
-        'echo "DIAG: harness exit=$rc"; ' +
-        'rm -f /host/tmp/cis_audit.sh 2>/dev/null; exit $rc'
+    # CRITICAL: do NOT pass any non-trivial argument through argv.
+    # PowerShell's Start-Process -ArgumentList re-quotes the Windows
+    # command-line and corrupts long/complex args (we observed our 22KB
+    # bash payload, and even a ~400-byte wrapper, getting truncated to
+    # just "set").  Solution: use `bash -s` so bash reads the entire
+    # script from stdin.  argv is then tiny and contains no quoting.
+    #
+    # Stdin we feed to kubectl debug:
+    #   base64 -d <<'B64_EOF' > /host/tmp/cis_audit.sh
+    #   <base64 of harness>
+    #   B64_EOF
+    #   chmod +x /host/tmp/cis_audit.sh
+    #   chroot /host /bin/bash /tmp/cis_audit.sh
+    #
+    # The heredoc is single-quoted so $foo / $(cmd) inside the base64
+    # blob are not expanded.  base64 contains no characters that would
+    # confuse the heredoc terminator, so this is bullet-proof.
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('set -o pipefail')
+    [void]$sb.AppendLine('if ! command -v base64 >/dev/null 2>&1; then echo "DIAG: base64 not in PATH=$PATH" >&2; exit 90; fi')
+    [void]$sb.AppendLine('if [ ! -d /host ]; then echo "DIAG: /host not mounted by kubectl debug" >&2; exit 91; fi')
+    [void]$sb.AppendLine("base64 -d <<'B64_EOF' > /host/tmp/cis_audit.sh")
+    [void]$sb.AppendLine($b64)
+    [void]$sb.AppendLine('B64_EOF')
+    [void]$sb.AppendLine('chmod +x /host/tmp/cis_audit.sh')
+    [void]$sb.AppendLine('echo "DIAG: wrote $(wc -c < /host/tmp/cis_audit.sh) bytes"')
+    [void]$sb.AppendLine('chroot /host /bin/bash /tmp/cis_audit.sh')
+    [void]$sb.AppendLine('rc=$?')
+    [void]$sb.AppendLine('echo "DIAG: harness exit=$rc"')
+    [void]$sb.AppendLine('rm -f /host/tmp/cis_audit.sh 2>/dev/null')
+    [void]$sb.AppendLine('exit $rc')
+    $stdinScript = $sb.ToString() -replace "`r`n","`n"
 
     $stdinFile = [System.IO.Path]::GetTempFileName()
-    [System.IO.File]::WriteAllText($stdinFile, $b64)
+    # WriteAllText with UTF8 (no BOM) so bash gets clean LF-only input.
+    [System.IO.File]::WriteAllText($stdinFile, $stdinScript, [System.Text.UTF8Encoding]::new($false))
     $tmpOut = [System.IO.Path]::GetTempFileName()
     $tmpErr = [System.IO.Path]::GetTempFileName()
 
     $img = $DebugImage
+    # argv is now trivially small: 'debug node/X --image=Y -i ... -- /bin/bash -s'
     $proc = Start-Process -FilePath "kubectl" `
         -ArgumentList @(
             "debug", "node/$NodeName",
@@ -300,7 +315,7 @@ function Invoke-NodeAudit {
             "--attach=true",
             "--quiet=true",
             "--",
-            "/bin/bash", "-c", $wrapper
+            "/bin/bash", "-s"
         ) `
         -NoNewWindow -PassThru `
         -RedirectStandardInput  $stdinFile `
@@ -338,16 +353,20 @@ function Remove-StaleDebugPods {
     param([string]$Node)
     Write-Host "  Cleaning up stale node-debugger-* pods on $Node ..." -ForegroundColor DarkGray
     try {
-        $names = & kubectl get pods --all-namespaces -o "jsonpath={range .items[?(@.spec.nodeName=='$Node')]}{.metadata.namespace}/{.metadata.name}{`"\n`"}{end}" 2>$null
+        # Get ALL node-debugger-* pods on this node, regardless of phase
+        # (Pending / Running / Succeeded / Failed / ImagePullBackOff).
+        $json = & kubectl get pods --all-namespaces --field-selector "spec.nodeName=$Node" -o json 2>$null | Out-String
+        if (-not $json) { return }
+        $obj = $json | ConvertFrom-Json
         $count = 0
-        foreach ($entry in ($names -split "`r?`n" | Where-Object { $_ -match '/node-debugger-' })) {
-            $parts = $entry -split '/'
-            if ($parts.Count -eq 2) {
-                & kubectl delete pod -n $parts[0] $parts[1] --ignore-not-found=true --grace-period=0 --force --wait=false 2>&1 | Out-Null
+        foreach ($p in $obj.items) {
+            if ($p.metadata.name -like 'node-debugger-*') {
+                & kubectl delete pod -n $p.metadata.namespace $p.metadata.name --ignore-not-found=true --grace-period=0 --force --wait=false 2>&1 | Out-Null
                 $count++
             }
         }
         if ($count -gt 0) { Write-Host ("    deleted {0} stale debug pod(s)" -f $count) -ForegroundColor Gray }
+        else              { Write-Host  "    (no stale debug pods found)" -ForegroundColor DarkGray }
     } catch {
         Write-Host ("    [WARN] cleanup failed: {0}" -f $_.Exception.Message) -ForegroundColor Magenta
     }
