@@ -266,10 +266,6 @@ function Invoke-NodeAudit {
     # Encode script as base64 to avoid shell-quoting headaches.
     $bytes  = [System.Text.Encoding]::UTF8.GetBytes($Script)
     $b64    = [Convert]::ToBase64String($bytes)
-    # Strategy: write the decoded script directly to /host/tmp (the node's
-    # real /tmp via the kubectl-debug host mount), then chroot into the host
-    # and run it.  Use a SINGLE-LINE podCmd with `;` between commands so
-    # Windows kubectl.exe argv serialization doesn't mangle embedded newlines.
     # Build podCmd using single-quoted PS fragments + $b64 concat to avoid
     # PowerShell trying to expand $PATH / $rc / $(...) inside the bash code.
     $podCmd =
@@ -282,15 +278,42 @@ function Invoke-NodeAudit {
         'chroot /host /bin/bash /tmp/cis_audit.sh; rc=$?; ' +
         'echo "DIAG: harness exit=$rc"; ' +
         'rm -f /host/tmp/cis_audit.sh 2>/dev/null; exit $rc'
-    try {
-        # CRITICAL: kubectl debug defaults --attach=false when -i/-t is not
-        # set, which means the debug pod runs but its stdout is never
-        # captured.  Force --attach=true so we get the harness output.
-        $output = kubectl debug "node/$NodeName" --image=$DebugImage --attach=true --quiet=true -- /bin/bash -c $podCmd 2>&1
-        return ($output | Out-String).Trim()
-    } catch {
-        return "ERROR: $($_.Exception.Message)"
+
+    # Run kubectl as a background job so we can show progress and enforce a
+    # timeout.  kubectl debug attaches to the pod and waits for it to exit;
+    # if the image pull is slow or the pod won't schedule, we want feedback
+    # rather than an indefinite hang.
+    $img = $DebugImage
+    $job = Start-Job -ScriptBlock {
+        param($node, $image, $cmd)
+        # < NUL ensures kubectl doesn't block waiting on stdin.
+        $env:KUBECTL_DEBUG_ATTACH = "1"
+        $out = & kubectl debug "node/$node" --image=$image --image-pull-policy=IfNotPresent --attach=true --quiet=true -- /bin/bash -c $cmd 2>&1 < $null
+        return ($out | Out-String)
+    } -ArgumentList $NodeName, $img, $podCmd
+
+    $timeoutSec = 600
+    $elapsed    = 0
+    $tickSec    = 15
+    while (-not $job.HasMoreData -or $job.State -eq 'Running') {
+        if ($job.State -ne 'Running') { break }
+        Start-Sleep -Seconds $tickSec
+        $elapsed += $tickSec
+        Write-Host ("    ... waiting on kubectl debug ({0}s elapsed)" -f $elapsed) -ForegroundColor DarkGray
+        if ($elapsed -ge $timeoutSec) {
+            Write-Host ("    [WARN] kubectl debug exceeded {0}s, stopping job" -f $timeoutSec) -ForegroundColor Magenta
+            Stop-Job $job -ErrorAction SilentlyContinue
+            break
+        }
     }
+    try {
+        $output = Receive-Job $job -ErrorAction SilentlyContinue
+    } catch {
+        $output = "ERROR: $($_.Exception.Message)"
+    }
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    if (-not $output) { $output = "ERROR: kubectl debug returned no output (timed out or pod failed to start)" }
+    return ($output | Out-String).Trim()
 }
 
 function Build-AuditScript {
