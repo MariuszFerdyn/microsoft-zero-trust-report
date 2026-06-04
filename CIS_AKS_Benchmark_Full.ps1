@@ -307,16 +307,19 @@ function Invoke-NodeAudit {
     Write-Host ("    stdin payload: {0} bytes -> {1}" -f (Get-Item $stdinFile).Length, $stdinFile) -ForegroundColor DarkGray
 
     $img = $DebugImage
-    # argv is now trivially small: 'debug node/X --image=Y -i ... -- /bin/bash -s'.
-    # We invoke kubectl via cmd.exe so the < and > redirections are handled
-    # by the shell, NOT by Start-Process (whose -RedirectStandardInput
-    # implementation has been observed to mis-deliver large stdin payloads
-    # to native .exe children, leaving kubectl with nothing to send to bash).
-    $kubectlCmd = "kubectl debug `"node/$NodeName`" --image=$img --image-pull-policy=IfNotPresent -i --attach=true --quiet=true -- /bin/bash -s"
-    $cmdLine = "$kubectlCmd < `"$stdinFile`" > `"$tmpOut`" 2> `"$tmpErr`""
-    $proc = Start-Process -FilePath "cmd.exe" `
-        -ArgumentList @("/c", $cmdLine) `
-        -NoNewWindow -PassThru -Wait:$false
+    # Write the full kubectl invocation (with shell-level redirections) to a
+    # temp .cmd file and run that. Avoids every known Windows argv-quoting
+    # issue with Start-Process: the .cmd file IS the command line, no
+    # re-escaping happens between PowerShell -> Win32 CreateProcess -> cmd.
+    $batFile = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), ".cmd")
+    $batBody = @"
+@echo off
+kubectl debug "node/$NodeName" --image=$img --image-pull-policy=IfNotPresent -i --attach=true --quiet=true -- /bin/bash -s < "$stdinFile" > "$tmpOut" 2> "$tmpErr"
+exit /b %errorlevel%
+"@
+    [System.IO.File]::WriteAllText($batFile, $batBody, [System.Text.UTF8Encoding]::new($false))
+
+    $proc = Start-Process -FilePath $batFile -NoNewWindow -PassThru
 
     $timeoutSec = 600
     $elapsed    = 0
@@ -341,7 +344,7 @@ function Invoke-NodeAudit {
     try { $stderr = Get-Content $tmpErr -Raw -ErrorAction SilentlyContinue } catch { }
     $exitCode = if ($proc.HasExited) { $proc.ExitCode } else { -1 }
     Write-Host ("    kubectl exit={0}, stdout={1}B, stderr={2}B" -f $exitCode, $stdout.Length, $stderr.Length) -ForegroundColor DarkGray
-    Remove-Item $tmpOut, $tmpErr, $stdinFile -ErrorAction SilentlyContinue
+    Remove-Item $tmpOut, $tmpErr, $stdinFile, $batFile -ErrorAction SilentlyContinue
     $output = ($stdout + "`n" + $stderr).Trim()
     if (-not $output) { $output = "ERROR: kubectl debug returned no output (exit=$exitCode, timed out or pod failed to start)" }
     return $output
