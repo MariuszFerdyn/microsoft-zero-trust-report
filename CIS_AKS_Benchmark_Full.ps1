@@ -18,8 +18,8 @@
     item-specific to encode generically) keep Status = MANL with the
     verbatim CIS Audit + Remediation procedure printed for human review.
 
-    Pass `-RunOnNodes` to run the on-node harness; without it, every item
-    is reported as MANL (no node evidence collected).
+    Pass `-SkipOnNodeAudit` to disable the on-node harness; with that flag
+    every item is reported as MANL (no node evidence collected).
 
     CSV schema (unchanged from sister benchmarks):
         Section, Title, Status, Detail
@@ -68,11 +68,17 @@
     iterative use).  When omitted and -RunOnNodes is specified, every Ready
     node is audited.
 
+.PARAMETER SkipOnNodeAudit
+    Switch.  By default the script launches `kubectl debug node` on each
+    Ready node and runs the CIS audit commands inside `chroot /host`,
+    deriving PASS / FAIL / SKIP per item.  Pass this switch to disable
+    the on-node audit (every item will then report MANL with only the
+    CIS Audit + Remediation text — no per-node evidence).
+
 .PARAMETER RunOnNodes
-    Switch.  When set, the script launches `kubectl debug node` on each
-    target node and runs the CIS audit commands inside `chroot /host`,
-    capturing raw output as evidence.  Each item's Status stays MANL but
-    Detail is enriched with the per-node audit output for human review.
+    Deprecated.  On-node auditing is now the default; this switch is
+    accepted for backward compatibility and is a no-op.  Use
+    -SkipOnNodeAudit to opt out.
 
 .PARAMETER DebugImage
     Container image used by `kubectl debug node`.  Defaults to a small
@@ -90,6 +96,7 @@ param(
     [Parameter(Mandatory=$false)][string]$ClusterName,
     [Parameter(Mandatory=$false)][string]$NodeName,
     [switch]$RunOnNodes,
+    [switch]$SkipOnNodeAudit,
     [string]$DebugImage = "mcr.microsoft.com/cbl-mariner/base/core:3.0",
     [string]$OutputPath = "$PSScriptRoot\CIS_AKS_Results_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 )
@@ -4260,7 +4267,7 @@ function Invoke-CisItems {
 
         $hasEval  = $Script:Evaluators.ContainsKey($it.Section)
         $captured = @{}
-        if ($RunOnNodes -and $Script:NodeOutputs.Count -gt 0) {
+        if ($Script:NodeOutputs.Count -gt 0) {
             foreach ($node in $Script:NodeOutputs.Keys) {
                 $cap = $Script:NodeOutputs[$node][$it.Section]
                 if ($cap) { $captured[$node] = $cap.Trim() }
@@ -4399,6 +4406,6 @@ function Show-Summary {
 # ===============================================================================
 Initialize-Tools
 Connect-Cluster
-if ($RunOnNodes) { Invoke-OnNodeAudits }
+if (-not $SkipOnNodeAudit) { Invoke-OnNodeAudits }
 Invoke-CisItems
 Show-Summary

@@ -29,16 +29,13 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 > sysctl, SSH, PAM, auditd, file permissions). None can be evaluated
 > through Azure ARM, Microsoft Graph, or kubectl against managed-cluster
 > endpoints, so the script collects evidence by running a privileged
-> `kubectl debug node` pod (chrooted to `/host`) on each Ready node when
-> `-RunOnNodes` is supplied. About **75 items** ship with on-node
-> evaluators that derive a real PASS / FAIL / SKIP verdict from the
-> captured output (kernel modules, sysctl, package presence, mount
-> options, file modes/owners, sshd config, systemd unit state). The
-> remaining **66 items** stay `Status = MANL` because the CIS Audit
-> logic is too item-specific to encode generically (e.g. PAM stack,
-> auditd rules, password aging, banner contents, complex postfix
-> checks) — these rows still print the verbatim CIS Audit and
-> Remediation procedure in the `Detail` column for human review,
+> `kubectl debug node` pod (chrooted to `/host`) on each Ready node **by
+> default** (pass `-SkipOnNodeAudit` to disable). About **75 items**
+> ship with on-node evaluators that derive a real PASS / FAIL / SKIP
+> verdict from the captured output. The remaining **66 items** stay
+> `Status = MANL` because the CIS Audit logic is too item-specific to
+> encode generically — these rows still print the verbatim CIS Audit
+> and Remediation procedure in the `Detail` column for human review,
 > together with the per-node captured output.
 
 ---
@@ -387,17 +384,21 @@ Once `kubectl get nodes` works against your cluster:
 .\CIS_AKS_Benchmark_Full.ps1 `
     -SubscriptionId "<sub-guid>" `
     -ResourceGroup  "<aks-rg>" `
-    -ClusterName    "<aks-cluster-name>" `
-    -RunOnNodes
+    -ClusterName    "<aks-cluster-name>"
 ```
 
-Without `-RunOnNodes` the script verifies the cluster is reachable, lists
-nodes, and prints every CIS item with its full Audit and Remediation
-procedure as a `MANL` row. With `-RunOnNodes`, the script additionally
-launches a privileged `kubectl debug node` pod on each Ready node and
-captures per-node evidence into the `Detail` column of each row. Status
-stays `MANL` either way — the operator interprets the captured evidence
-against the CIS pass criteria printed alongside it.
+By **default** the script launches a privileged `kubectl debug node` pod
+on each Ready node (chrooted to `/host`), runs the CIS audit commands,
+and aggregates per-node output into a real PASS / FAIL / SKIP verdict
+for the ~75 items that ship with on-node evaluators. The remaining ~66
+items stay `MANL` (CIS audit logic too item-specific to encode
+generically) — those rows still print the verbatim CIS Audit and
+Remediation procedure plus the captured per-node output for human
+review.
+
+Pass `-SkipOnNodeAudit` to disable the on-node harness (every item
+becomes `MANL`, no node evidence collected). The legacy `-RunOnNodes`
+switch is accepted as a no-op for backward compatibility.
 
 Results are saved to a timestamped CSV file: `CIS_AKS_Results_<date>.csv`
 
