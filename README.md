@@ -9,7 +9,7 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 | CIS Microsoft Azure Foundations | v5.0.0 | 103 | 62 | `CIS_Azure_Benchmark_Full.ps1` | `CIS_Azure_Permissions.ps1` |
 | CIS Microsoft 365 Foundations | v6.0.1 | 129 | 11 | `CIS_M365_Benchmark_Full.ps1` | `CIS_M365_Permissions.ps1` |
 | CIS Microsoft Dynamics 365 / Power Platform Foundations | v1.0.0 | 16¹ | 16 | `CIS_Power_Platform_Benchmark_Full.ps1` | `CIS_Power_Platform_Permissions.ps1` |
-| CIS AKS Optimized Azure Linux 3 | v1.0.0 | 75² | 66 | `CIS_AKS_Benchmark_Full.ps1` | _(none — operator's existing kubeconfig)_ |
+| CIS AKS Optimized Azure Linux 3 | v1.0.0 | 136² | 5 | `CIS_AKS_Benchmark_Full.ps1` | _(none — operator's existing kubeconfig)_ |
 
 > **Manual (MANL) checks** cover CIS items that cannot be fully verified via
 > API. The scripts still surface them in a dedicated `SECTION MANL` block,
@@ -30,13 +30,13 @@ Automated PowerShell scripts to audit your **Microsoft Azure** and **Microsoft 3
 > through Azure ARM, Microsoft Graph, or kubectl against managed-cluster
 > endpoints, so the script collects evidence by running a privileged
 > `kubectl debug node` pod (chrooted to `/host`) on each Ready node **by
-> default** (pass `-SkipOnNodeAudit` to disable). About **75 items**
-> ship with on-node evaluators that derive a real PASS / FAIL / SKIP
-> verdict from the captured output. The remaining **66 items** stay
-> `Status = MANL` because the CIS Audit logic is too item-specific to
-> encode generically — these rows still print the verbatim CIS Audit
-> and Remediation procedure in the `Detail` column for human review,
-> together with the per-node captured output.
+> default** (pass `-SkipOnNodeAudit` to disable). All **136 CIS items
+> classified Automated** in the benchmark ship with on-node evaluators
+> that derive a real PASS / FAIL / SKIP verdict from the captured host
+> output. The remaining **5 CIS Manual** items stay `Status = MANL`,
+> and still print the verbatim Audit and Remediation procedure in the
+> `Detail` column for human review together with the per-node captured
+> output.
 
 ---
 

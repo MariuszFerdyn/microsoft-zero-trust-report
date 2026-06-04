@@ -24,9 +24,10 @@
     CSV schema (unchanged from sister benchmarks):
         Section, Title, Status, Detail
         Status in { PASS, FAIL, WARN, SKIP, MANL }
-    For this benchmark every row carries Status = MANL; PASS / FAIL / SKIP /
-    WARN are reserved for the prerequisite cluster-discovery rows
-    (cluster reachability, osSku check, debug-pod launch result, etc.).
+    Prerequisite rows (cluster reachability, osSku check, debug-pod launch
+    result, etc.) emit PASS / FAIL / WARN. CIS item rows with an on-node
+    evaluator also emit PASS / FAIL / SKIP based on captured node output; the
+    remaining items stay MANL.
 
 .NOTES
     Required tooling (the helper installs Azure CLI / kubectl on demand):
@@ -229,7 +230,7 @@ function Connect-Cluster {
 
     # kubeconfig (admin first, fall back to user)
     Write-Host "  Getting kubeconfig..." -ForegroundColor Yellow
-    $rc = az aks get-credentials -g $ResourceGroup -n $ClusterName --overwrite-existing --only-show-errors 2>&1
+    $rc = az aks get-credentials -g $ResourceGroup -n $ClusterName --admin --overwrite-existing --only-show-errors 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [WARN] az aks get-credentials returned non-zero exit code - $rc" -ForegroundColor Yellow
     }
@@ -260,93 +261,116 @@ function Connect-Cluster {
 function Invoke-NodeAudit {
     param(
         [Parameter(Mandatory=$true)][string]$NodeName,
-        [Parameter(Mandatory=$true)][string]$Script
+        [Parameter(Mandatory=$true)][string]$Script,
+        [int]$ExpectedSections = 0
     )
-    # Normalize line endings to LF.
     $Script = $Script -replace "`r`n","`n" -replace "`r","`n"
-    $bytes  = [System.Text.Encoding]::UTF8.GetBytes($Script)
-    $b64    = [Convert]::ToBase64String($bytes)
+    $b64    = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Script))
+    $stdinScript = @"
+set -o pipefail
+if ! command -v base64 >/dev/null 2>&1; then echo "DIAG: base64 not in PATH=`$PATH" >&2; exit 90; fi
+if [ ! -d /host ]; then echo "DIAG: /host not mounted by kubectl debug" >&2; exit 91; fi
+base64 -d <<'B64_EOF' > /host/tmp/cis_audit.sh
+$b64
+B64_EOF
+chmod +x /host/tmp/cis_audit.sh
+chroot /host /bin/bash /tmp/cis_audit.sh
+rc=`$?
+rm -f /host/tmp/cis_audit.sh 2>/dev/null
+exit `$rc
+"@ -replace "`r`n","`n"
 
-    # CRITICAL: do NOT pass any non-trivial argument through argv.
-    # PowerShell's Start-Process -ArgumentList re-quotes the Windows
-    # command-line and corrupts long/complex args (we observed our 22KB
-    # bash payload, and even a ~400-byte wrapper, getting truncated to
-    # just "set").  Solution: use `bash -s` so bash reads the entire
-    # script from stdin.  argv is then tiny and contains no quoting.
-    #
-    # Stdin we feed to kubectl debug:
-    #   base64 -d <<'B64_EOF' > /host/tmp/cis_audit.sh
-    #   <base64 of harness>
-    #   B64_EOF
-    #   chmod +x /host/tmp/cis_audit.sh
-    #   chroot /host /bin/bash /tmp/cis_audit.sh
-    #
-    # The heredoc is single-quoted so $foo / $(cmd) inside the base64
-    # blob are not expanded.  base64 contains no characters that would
-    # confuse the heredoc terminator, so this is bullet-proof.
-    $sb = New-Object System.Text.StringBuilder
-    [void]$sb.AppendLine('set -o pipefail')
-    [void]$sb.AppendLine('if ! command -v base64 >/dev/null 2>&1; then echo "DIAG: base64 not in PATH=$PATH" >&2; exit 90; fi')
-    [void]$sb.AppendLine('if [ ! -d /host ]; then echo "DIAG: /host not mounted by kubectl debug" >&2; exit 91; fi')
-    [void]$sb.AppendLine("base64 -d <<'B64_EOF' > /host/tmp/cis_audit.sh")
-    [void]$sb.AppendLine($b64)
-    [void]$sb.AppendLine('B64_EOF')
-    [void]$sb.AppendLine('chmod +x /host/tmp/cis_audit.sh')
-    [void]$sb.AppendLine('echo "DIAG: wrote $(wc -c < /host/tmp/cis_audit.sh) bytes"')
-    [void]$sb.AppendLine('chroot /host /bin/bash /tmp/cis_audit.sh')
-    [void]$sb.AppendLine('rc=$?')
-    [void]$sb.AppendLine('echo "DIAG: harness exit=$rc"')
-    [void]$sb.AppendLine('rm -f /host/tmp/cis_audit.sh 2>/dev/null')
-    [void]$sb.AppendLine('exit $rc')
-    $stdinScript = $sb.ToString() -replace "`r`n","`n"
+    $kubectl = (Get-Command kubectl).Source
+    $argLine = "debug `"node/$NodeName`" --image=$DebugImage --image-pull-policy=IfNotPresent --profile=sysadmin --attach=true -i -q -- /bin/bash -s"
 
-    $stdinFile = [System.IO.Path]::GetTempFileName()
-    [System.IO.File]::WriteAllText($stdinFile, $stdinScript, [System.Text.UTF8Encoding]::new($false))
-    $tmpOut = [System.IO.Path]::GetTempFileName()
-    $tmpErr = [System.IO.Path]::GetTempFileName()
-    Write-Host ("    stdin payload: {0} bytes -> {1}" -f (Get-Item $stdinFile).Length, $stdinFile) -ForegroundColor DarkGray
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName               = $kubectl
+    $psi.Arguments              = $argLine
+    $psi.RedirectStandardInput  = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.UseShellExecute        = $false
+    $psi.CreateNoWindow         = $true
 
-    $img = $DebugImage
-    # Write the full kubectl invocation (with shell-level redirections) to a
-    # temp .cmd file and run that. Avoids every known Windows argv-quoting
-    # issue with Start-Process: the .cmd file IS the command line, no
-    # re-escaping happens between PowerShell -> Win32 CreateProcess -> cmd.
-    $batFile = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), ".cmd")
-    $batBody = @"
-@echo off
-kubectl debug "node/$NodeName" --image=$img --image-pull-policy=IfNotPresent -i --attach=true --quiet=true -- /bin/bash -s < "$stdinFile" > "$tmpOut" 2> "$tmpErr"
-exit /b %errorlevel%
-"@
-    [System.IO.File]::WriteAllText($batFile, $batBody, [System.Text.UTF8Encoding]::new($false))
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    $null = $proc.Start()
+    $proc.StandardInput.Write($stdinScript)
+    $proc.StandardInput.Close()
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
+    if (-not $proc.WaitForExit(600000)) { try { $proc.Kill() } catch {} }
+    $stdout = $outTask.Result
+    $stderr = $errTask.Result
+    $exitCode = $proc.ExitCode
 
-    $proc = Start-Process -FilePath $batFile -NoNewWindow -PassThru
-
-    $timeoutSec = 600
-    $elapsed    = 0
-    $tickSec    = 15
-    while (-not $proc.HasExited) {
-        Start-Sleep -Seconds $tickSec
-        $elapsed += $tickSec
-        Write-Host ("    ... waiting on kubectl debug ({0}s elapsed)" -f $elapsed) -ForegroundColor DarkGray
-        try {
-            $any = & kubectl get pods --all-namespaces --field-selector "spec.nodeName=$NodeName" -o "jsonpath={range .items[*]}{.metadata.name}\t{.status.phase}\t{range .status.containerStatuses[*]}{.state.waiting.reason}{.state.waiting.message}{end}{`"\n`"}{end}" 2>$null
-            $debug = ($any -split "`r?`n") | Where-Object { $_ -match 'debugger' }
-            foreach ($l in $debug) { Write-Host ("      pod-status: " + $l) -ForegroundColor DarkYellow }
-        } catch { }
-        if ($elapsed -ge $timeoutSec) {
-            Write-Host ("    [WARN] kubectl debug exceeded {0}s, killing process {1}" -f $timeoutSec, $proc.Id) -ForegroundColor Magenta
-            try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
-            break
-        }
-    }
-    $stdout = ""; $stderr = ""
-    try { $stdout = Get-Content $tmpOut -Raw -ErrorAction SilentlyContinue } catch { }
-    try { $stderr = Get-Content $tmpErr -Raw -ErrorAction SilentlyContinue } catch { }
-    $exitCode = if ($proc.HasExited) { $proc.ExitCode } else { -1 }
     Write-Host ("    kubectl exit={0}, stdout={1}B, stderr={2}B" -f $exitCode, $stdout.Length, $stderr.Length) -ForegroundColor DarkGray
-    Remove-Item $tmpOut, $tmpErr, $stdinFile, $batFile -ErrorAction SilentlyContinue
     $output = ($stdout + "`n" + $stderr).Trim()
-    if (-not $output) { $output = "ERROR: kubectl debug returned no output (exit=$exitCode, timed out or pod failed to start)" }
+
+    try {
+        $streamMarkers = ([regex]::Matches($output, '(?m)^<<<CIS:.+?>>>$')).Count
+        $stablePolls = 0
+        $maxPolls = if ($ExpectedSections -gt 0) { 60 } else { 24 }
+        for ($attempt = 0; $attempt -lt $maxPolls; $attempt++) {
+            $podsJson = & kubectl get pods --all-namespaces --field-selector "spec.nodeName=$NodeName" -o json 2>$null | Out-String
+            if (-not $podsJson) {
+                if ($streamMarkers -gt 0) {
+                    $stablePolls++
+                    if ($ExpectedSections -gt 0 -and $streamMarkers -ge $ExpectedSections) { break }
+                    if ($stablePolls -ge 12) { break }
+                }
+                Start-Sleep -Seconds 5
+                continue
+            }
+            $pods = (ConvertFrom-Json $podsJson).items |
+                Where-Object { $_.metadata.name -like 'node-debugger-*' } |
+                Sort-Object { [datetime]$_.metadata.creationTimestamp } -Descending
+            $pod = $pods | Select-Object -First 1
+            if (-not $pod) {
+                if ($streamMarkers -gt 0) {
+                    $stablePolls++
+                    if ($ExpectedSections -gt 0 -and $streamMarkers -ge $ExpectedSections) { break }
+                    if ($stablePolls -ge 12) { break }
+                }
+                Start-Sleep -Seconds 5
+                continue
+            }
+
+            $logOutput = (& kubectl logs -n $pod.metadata.namespace $pod.metadata.name 2>$null | Out-String).Trim()
+            if ($logOutput) {
+                $logMarkers = ([regex]::Matches($logOutput, '(?m)^<<<CIS:.+?>>>$')).Count
+                if ($logMarkers -gt $streamMarkers) {
+                    Write-Host ("    using pod logs from {0}/{1} ({2} section markers vs {3} from attach stream)" -f $pod.metadata.namespace, $pod.metadata.name, $logMarkers, $streamMarkers) -ForegroundColor DarkGray
+                    $output = $logOutput
+                    $streamMarkers = $logMarkers
+                    $stablePolls = 0
+                } elseif ($logMarkers -eq $streamMarkers -and $streamMarkers -gt 0) {
+                    $stablePolls++
+                }
+            }
+
+            if ($ExpectedSections -gt 0 -and $streamMarkers -ge $ExpectedSections) {
+                break
+            }
+
+            if ($pod.status.phase -in @('Succeeded', 'Failed') -and $streamMarkers -gt 0) {
+                break
+            }
+
+            if ($stablePolls -ge 12) {
+                break
+            }
+
+            Start-Sleep -Seconds 5
+        }
+    } catch {
+        Write-Host ("    [WARN] could not read debug pod logs: {0}" -f $_.Exception.Message) -ForegroundColor Magenta
+    }
+
+    if (-not $output) {
+        $output = "ERROR: kubectl debug returned no output (exit=$exitCode)"
+    }
+
     return $output
 }
 
@@ -537,13 +561,174 @@ _mount_option() {
     opts=$(findmnt -kn -o OPTIONS "$mp" 2>/dev/null)
     if echo ",$opts," | grep -q ",$opt,"; then echo "PASS"; else echo "FAIL: $mp options='$opts' missing '$opt'"; fi
 }
+
+_stat_restrictive() {
+    local f="$1"; local mask="$2"; local owner_re="$3"; local group_re="$4"; local allow_missing="$5"
+    if [ ! -e "$f" ]; then
+        if [ "$allow_missing" = "allow-missing" ]; then echo "PASS"; else echo "FAIL: $f does not exist"; fi
+        return
+    fi
+    local mode owner group
+    read -r mode owner group < <(stat -Lc '%a %U %G' "$f" 2>/dev/null)
+    if [ -z "$mode" ]; then
+        echo "FAIL: could not stat $f"
+        return
+    fi
+    if [ $(( (8#$mode) & (8#$mask) )) -gt 0 ]; then
+        echo "FAIL: $f mode='$mode' is too permissive"
+        return
+    fi
+    if ! echo "$owner" | grep -Piq -- "^(${owner_re})$"; then
+        echo "FAIL: $f owner='$owner' expected '${owner_re}'"
+        return
+    fi
+    if ! echo "$group" | grep -Piq -- "^(${group_re})$"; then
+        echo "FAIL: $f group='$group' expected '${group_re}'"
+        return
+    fi
+    echo "PASS"
+}
+
+_banner_clean() {
+    local f="$1"
+    if [ ! -e "$f" ]; then
+        echo "FAIL: $f does not exist"
+        return
+    fi
+    local osid=""
+    osid=$(grep '^ID=' /etc/os-release 2>/dev/null | head -n1 | cut -d= -f2 | tr -d '"')
+    if grep -Eq '(\\v|\\r|\\m|\\s)' "$f" 2>/dev/null; then
+        echo "FAIL: prohibited escape sequence found in $f"
+        return
+    fi
+    if [ -n "$osid" ] && grep -Fqi -- "$osid" "$f" 2>/dev/null; then
+        echo "FAIL: OS identifier '$osid' found in $f"
+        return
+    fi
+    echo "PASS"
+}
+
+_sysctl_runtime_and_file() {
+    local key="$1"; local value_re="$2"
+    local got
+    got=$(sysctl -n "$key" 2>/dev/null | xargs)
+    if ! echo "$got" | grep -Piq -- "^(${value_re})$"; then
+        echo "FAIL: runtime $key='$got' expected '${value_re}'"
+        return
+    fi
+    if grep -Psq -- "^\h*${key//./\\.}\h*=\h*(${value_re})\b" /etc/sysctl.conf /etc/sysctl.d/*.conf /usr/lib/sysctl.d/*.conf /run/sysctl.d/*.conf /lib/sysctl.d/*.conf 2>/dev/null; then
+        echo "PASS"
+    else
+        echo "FAIL: $key not set persistently in sysctl config"
+    fi
+}
+
+_systemd_option_check() {
+    local conf="$1"; local block="$2"; local opt="$3"; local want_re="$4"
+    local analyze
+    analyze=$(command -v systemd-analyze 2>/dev/null)
+    if [ -z "$analyze" ]; then
+        echo "SKIP: systemd-analyze not present"
+        return
+    fi
+    local got
+    got=$("$analyze" cat-config "$conf" 2>/dev/null | awk -v b="$block" -v o="$opt" '
+        BEGIN { IGNORECASE=1 }
+        /^\s*\[/ {
+            cur=$0
+            gsub(/[\[\] \t]/, "", cur)
+            in_block=(tolower(cur)==tolower(b))
+            next
+        }
+        in_block && $0 !~ /^\s*#/ && index($0, "=") > 0 {
+            key=substr($0, 1, index($0, "=")-1)
+            gsub(/[ \t]/, "", key)
+            if (tolower(key)==tolower(o)) {
+                val=substr($0, index($0, "=")+1)
+                gsub(/^[ \t]+|[ \t]+$/, "", val)
+                last=val
+            }
+        }
+        END { print last }
+    ')
+    if [ -z "$got" ]; then
+        echo "FAIL: effective $opt not set in $conf"
+    elif echo "$got" | grep -Piq -- "^(${want_re})$"; then
+        echo "PASS"
+    else
+        echo "FAIL: effective $opt='$got' expected '${want_re}'"
+    fi
+}
+
+_sshd_value() {
+    local key="$1"
+    sshd -T 2>/dev/null | awk -v k="$key" 'tolower($1)==tolower(k){$1=""; sub(/^ /,""); print; exit}'
+}
+
+_sshd_private_keys_check() {
+    local ssh_group=""
+    ssh_group=$(awk -F: '($1 ~ /^(ssh_keys|_?ssh)$/) {print $1; exit}' /etc/group 2>/dev/null)
+    local found=0; local bad=()
+    for f in /etc/ssh/ssh_host_*_key; do
+        [ -e "$f" ] || continue
+        found=1
+        local mode owner group mask
+        read -r mode owner group < <(stat -Lc '%a %U %G' "$f" 2>/dev/null)
+        mask='0177'
+        if [ -n "$ssh_group" ] && [ "$group" = "$ssh_group" ]; then mask='0137'; fi
+        if [ $(( (8#$mode) & (8#$mask) )) -gt 0 ] || [ "$owner" != "root" ] || { [ "$group" != "root" ] && { [ -z "$ssh_group" ] || [ "$group" != "$ssh_group" ]; }; }; then
+            bad+=("$f(mode=$mode owner=$owner group=$group)")
+        fi
+    done
+    if [ $found -eq 0 ]; then
+        echo "SKIP: no SSH private host keys found"
+    elif [ ${#bad[@]} -eq 0 ]; then
+        echo "PASS"
+    else
+        echo "FAIL: ${bad[*]}"
+    fi
+}
+
+_sshd_public_keys_check() {
+    local found=0; local bad=()
+    for f in /etc/ssh/ssh_host_*_key.pub; do
+        [ -e "$f" ] || continue
+        found=1
+        local mode owner group
+        read -r mode owner group < <(stat -Lc '%a %U %G' "$f" 2>/dev/null)
+        if [ $(( (8#$mode) & (8#0133) )) -gt 0 ] || [ "$owner" != "root" ] || [ "$group" != "root" ]; then
+            bad+=("$f(mode=$mode owner=$owner group=$group)")
+        fi
+    done
+    if [ $found -eq 0 ]; then
+        echo "SKIP: no SSH public host keys found"
+    elif [ ${#bad[@]} -eq 0 ]; then
+        echo "PASS"
+    else
+        echo "FAIL: ${bad[*]}"
+    fi
+}
+
+_interactive_users() {
+    local pat
+    pat="^($(awk -F/ '$NF != "nologin" {print}' /etc/shells 2>/dev/null | sed -rn '/^\//{s,/,\\/,g;p}' | paste -s -d"|" -))$"
+    awk -v pat="$pat" -F: '$(NF) ~ pat { print $1 ":" $(NF-1) }' /etc/passwd 2>/dev/null
+}
 '@)
+    # Give the debug container a moment to attach logging before the first
+    # section marker; otherwise the earliest lines can be dropped.
+    [void]$sb.AppendLine('sleep 1')
+    [void]$sb.AppendLine("echo 'CIS-AUDIT-START'")
 
     foreach ($it in $Script:CIS_ITEMS) {
         $sec = $it.Section
         [void]$sb.AppendLine("echo '<<<CIS:$sec>>>'")
         if ($Script:Evaluators.ContainsKey($sec)) {
+            # Run each evaluator in its own subshell so item-local `exit`
+            # statements do not terminate the full harness early.
+            [void]$sb.AppendLine('(')
             [void]$sb.AppendLine($Script:Evaluators[$sec])
+            [void]$sb.AppendLine(')')
         }
         [void]$sb.AppendLine("echo '<<<CIS_END:$sec>>>'")
     }
@@ -683,6 +868,454 @@ _unit_not_in_use firewalld.service
     '7.1.8'  = '_stat_check /etc/gshadow-          "0 root root" "0 root shadow"'
     '7.1.9'  = '_stat_check /etc/shells            "644 root root"'
     '7.1.10' = '_stat_check /etc/security/opasswd  "600 root root"'
+
+    # ----- 1.2 Package manager verification ------------------------------------
+    '1.2.1.2' = @'
+if grep -Piq -- "^\h*gpgcheck\h*=\h*(1|true|yes)\b" /etc/dnf/dnf.conf 2>/dev/null &&
+   ! grep -Prisq -- "^\h*gpgcheck\h*=\h*(0|[2-9]|[1-9][0-9]+|false|no)\b" /etc/yum.repos.d/ 2>/dev/null; then
+    echo PASS
+else
+    echo "FAIL: gpgcheck is not globally enabled or is disabled in /etc/yum.repos.d/"
+fi
+'@
+    '1.2.1.3' = @'
+if grep -Piq -- "^\h*gpgcheck\h*=\h*1\b" /etc/tdnf/tdnf.conf 2>/dev/null &&
+   ! grep -Psq -- "^\h*gpgcheck\h*=\h*[^1\r\n]\b" /etc/yum.repos.d/* 2>/dev/null; then
+    echo PASS
+else
+    echo "FAIL: tdnf gpgcheck is not set to 1 or repo override is invalid"
+fi
+'@
+
+    # ----- 1.3 Additional host hardening ---------------------------------------
+    '1.3.1' = '_sysctl_runtime_and_file kernel.randomize_va_space 2'
+    '1.3.2' = '_sysctl_runtime_and_file kernel.yama.ptrace_scope "(1|2|3)"'
+    '1.3.3' = '_systemd_option_check /etc/systemd/coredump.conf Coredump ProcessSizeMax 0'
+    '1.3.4' = '_systemd_option_check /etc/systemd/coredump.conf Coredump Storage none'
+
+    # ----- 1.4 Banners ----------------------------------------------------------
+    '1.4.1' = '_banner_clean /etc/issue'
+    '1.4.2' = '_banner_clean /etc/issue.net'
+    '1.4.3' = '_stat_restrictive /etc/motd 0133 root root allow-missing'
+    '1.4.4' = '_stat_restrictive /etc/issue 0133 root root'
+    '1.4.5' = '_stat_restrictive /etc/issue.net 0133 root root'
+
+    # ----- 2.2 Mail transfer agent ---------------------------------------------
+    '2.2.17' = @'
+if ss -lntu 2>/dev/null | grep -P ":[[:space:]]*25\b|:25\b" | grep -Pv "\h+(127\.0\.0\.1|\[?::1\]?):25\b" >/dev/null 2>&1; then
+    echo "FAIL: MTA is listening on a non-loopback address"
+else
+    echo PASS
+fi
+'@
+
+    # ----- 5.1 Cron and at restrictions ----------------------------------------
+    '5.1.8' = @'
+res=$(_stat_restrictive /etc/cron.allow 0137 root root)
+if [ "$res" != PASS ]; then echo "$res"; exit 0; fi
+if [ -e /etc/cron.deny ]; then
+    _stat_restrictive /etc/cron.deny 0137 root root
+else
+    echo PASS
+fi
+'@
+    '5.1.9' = @'
+if ! rpm -q at >/dev/null 2>&1; then echo PASS; exit 0; fi
+res=$(_stat_restrictive /etc/at.allow 0137 root root)
+if [ "$res" != PASS ]; then echo "$res"; exit 0; fi
+if [ -e /etc/at.deny ]; then
+    _stat_restrictive /etc/at.deny 0137 root root
+else
+    echo PASS
+fi
+'@
+
+    # ----- 5.2 Additional SSH settings -----------------------------------------
+    '5.2.2' = '_sshd_private_keys_check'
+    '5.2.3' = '_sshd_public_keys_check'
+    '5.2.4' = @'
+if sshd -T 2>/dev/null | grep -Pi -- "^ciphers\h+\"?([^#\n\r]+,)?((3des|blowfish|cast128|aes(128|192|256))cbc|arcfour(128|256)?|rijndael-cbc@lysator\.liu\.se|chacha20poly1305@openssh\.com)\b" >/dev/null; then
+    echo "FAIL: weak SSH cipher is enabled"
+else
+    echo PASS
+fi
+'@
+    '5.2.5' = @'
+if sshd -T 2>/dev/null | grep -Pi -- "kexalgorithms\h+([^#\n\r]+,)?(diffie-hellman-group1-sha1|diffie-hellman-group14-sha1|diffie-hellman-group-exchange-sha1)\b" >/dev/null; then
+    echo "FAIL: weak SSH key exchange algorithm is enabled"
+else
+    echo PASS
+fi
+'@
+    '5.2.6' = @'
+if sshd -T 2>/dev/null | grep -Pi -- "macs\h+([^#\n\r]+,)?(hmac-md5|hmac-md5-96|hmac-ripemd160|hmac-sha1-96|umac-64@openssh\.com|hmac-md5-etm@openssh\.com|hmac-md5-96-etm@openssh\.com|hmac-ripemd160-etm@openssh\.com|hmac-sha1-96-etm@openssh\.com|umac-64-etm@openssh\.com)\b" >/dev/null; then
+    echo "FAIL: weak SSH MAC is enabled"
+else
+    echo PASS
+fi
+'@
+    '5.2.7' = @'
+if sshd -T 2>/dev/null | grep -Piq -- "^\h*(allowusers|allowgroups|denyusers|denygroups)\h+\H+"; then
+    echo PASS
+else
+    echo "FAIL: no SSH allow/deny access control is configured"
+fi
+'@
+    '5.2.8' = @'
+banner_path=$(sshd -T 2>/dev/null | awk '$1=="banner"{print $2; exit}')
+if [ -z "$banner_path" ] || [ "$banner_path" = "none" ]; then
+    echo "FAIL: SSH banner is not configured"
+elif [ ! -e "$banner_path" ]; then
+    echo "FAIL: SSH banner file '$banner_path' does not exist"
+else
+    _banner_clean "$banner_path"
+fi
+'@
+    '5.2.9' = @'
+ival=$(_sshd_value clientaliveinterval | awk '{print $1}')
+cval=$(_sshd_value clientalivecountmax | awk '{print $1}')
+if echo "$ival" | grep -Eq '^[1-9][0-9]*$' && echo "$cval" | grep -Eq '^[1-9][0-9]*$'; then
+    echo PASS
+else
+    echo "FAIL: ClientAliveInterval='$ival' ClientAliveCountMax='$cval' expected both > 0"
+fi
+'@
+    '5.2.12' = @'
+v=$(_sshd_value logingracetime | awk '{print $1}')
+secs="$v"
+if echo "$v" | grep -Eq '^[0-9]+m$'; then secs=$(( ${v%m} * 60 )); fi
+if echo "$v" | grep -Eq '^[0-9]+s$'; then secs=${v%s}; fi
+if echo "$secs" | grep -Eq '^[0-9]+$' && [ "$secs" -ge 1 ] && [ "$secs" -le 60 ]; then
+    echo PASS
+else
+    echo "FAIL: LoginGraceTime='$v' expected between 1 and 60 seconds"
+fi
+'@
+    '5.2.13' = @'
+v=$(_sshd_value loglevel | awk '{print toupper($1)}')
+if echo "$v" | grep -Eq '^(INFO|VERBOSE)$'; then
+    echo PASS
+else
+    echo "FAIL: LogLevel='$v' expected INFO or VERBOSE"
+fi
+'@
+    '5.2.14' = @'
+v=$(_sshd_value maxauthtries | awk '{print $1}')
+if echo "$v" | grep -Eq '^[0-9]+$' && [ "$v" -le 4 ]; then
+    echo PASS
+else
+    echo "FAIL: MaxAuthTries='$v' expected 4 or less"
+fi
+'@
+    '5.2.15' = @'
+v=$(_sshd_value maxstartups | awk '{print $1}')
+if echo "$v" | awk -F: '{exit !($1<=10 && $2<=30 && $3<=100)}'; then
+    echo PASS
+else
+    echo "FAIL: MaxStartups='$v' expected 10:30:100 or more restrictive"
+fi
+'@
+    '5.2.16' = @'
+v=$(_sshd_value maxsessions | awk '{print $1}')
+if echo "$v" | grep -Eq '^[0-9]+$' && [ "$v" -le 10 ]; then
+    echo PASS
+else
+    echo "FAIL: MaxSessions='$v' expected 10 or less"
+fi
+'@
+
+    # ----- 5.3 Sudo ------------------------------------------------------------
+    '5.3.2' = @'
+if grep -rqs -- "^[^#].*!authenticate" /etc/sudoers /etc/sudoers.d/* 2>/dev/null; then
+    echo "FAIL: !authenticate found in sudoers configuration"
+else
+    echo PASS
+fi
+'@
+    '5.3.3' = @'
+timeouts=$(grep -rhoP -- "timestamp_timeout=\K-?[0-9]+" /etc/sudoers /etc/sudoers.d/* 2>/dev/null)
+if [ -z "$timeouts" ]; then
+    echo PASS
+elif echo "$timeouts" | awk '{if ($1 < 0 || $1 > 15) exit 1}'; then
+    echo PASS
+else
+    echo "FAIL: sudo timestamp_timeout exceeds 15 minutes or is disabled"
+fi
+'@
+
+    # ----- 5.4 Password policy -------------------------------------------------
+    '5.4.1' = @'
+ok_len=0; ok_complex=0; ok_retry=0
+grep -Piq -- "^\h*minlen\h*=\h*(1[4-9]|[2-9][0-9]+)\b" /etc/security/pwquality.conf 2>/dev/null && ok_len=1
+grep -Piq -- "^\h*minclass\h*=\h*[4-9]\b" /etc/security/pwquality.conf 2>/dev/null && ok_complex=1
+if [ $ok_complex -eq 0 ] &&
+   grep -Piq -- "^\h*dcredit\h*=\h*-1\b" /etc/security/pwquality.conf 2>/dev/null &&
+   grep -Piq -- "^\h*ucredit\h*=\h*-1\b" /etc/security/pwquality.conf 2>/dev/null &&
+   grep -Piq -- "^\h*lcredit\h*=\h*-1\b" /etc/security/pwquality.conf 2>/dev/null &&
+   grep -Piq -- "^\h*ocredit\h*=\h*-1\b" /etc/security/pwquality.conf 2>/dev/null; then
+    ok_complex=1
+fi
+if grep -Pq -- "^\h*password\h+([^#\n\r]+\h+)?pam_pwquality\.so\h+([^#\n\r]+\h+)?retry=[1-3]\b" /etc/pam.d/system-password 2>/dev/null &&
+   grep -Pq -- "^\h*password\h+([^#\n\r]+\h+)?pam_pwquality\.so\h+([^#\n\r]+\h+)?retry=[1-3]\b" /etc/pam.d/system-auth 2>/dev/null; then
+    ok_retry=1
+fi
+if [ $ok_len -eq 1 ] && [ $ok_complex -eq 1 ] && [ $ok_retry -eq 1 ]; then
+    echo PASS
+else
+    echo "FAIL: password creation requirements are not fully configured"
+fi
+'@
+    '5.4.2' = @'
+count=$(grep -P -- "^\h*auth\h+[^#\n\r]+\h+pam_faillock\.so\s+.*deny=([1-5])\b.*unlock_time=(0|9[0-9]{2,}|[1-9][0-9]{3,})\b" /etc/pam.d/system-password /etc/pam.d/system-auth 2>/dev/null | wc -l)
+if [ "$count" -ge 2 ]; then
+    echo PASS
+else
+    echo "FAIL: pam_faillock deny/unlock_time configuration is missing or too weak"
+fi
+'@
+    '5.4.3' = @'
+if grep -Pq -- "^\h*password\h+([^#\n\r]+)?\h+pam_unix\.so\h+([^#\n\r]+\h+)?sha512\b" /etc/pam.d/system-auth 2>/dev/null &&
+   grep -Pq -- "^\h*password\h+([^#\n\r]+)?\h+pam_unix\.so\h+([^#\n\r]+\h+)?sha512\b" /etc/pam.d/system-password 2>/dev/null; then
+    echo PASS
+else
+    echo "FAIL: pam_unix sha512 is not configured in both PAM files"
+fi
+'@
+    '5.4.4' = @'
+if grep -Pq -- "^\h*password\h+[^#\n\r]+\h+pam_pwhistory\.so\h+([^#\n\r]+\h+)?remember=([5-9]|[1-9][0-9]+)\b" /etc/pam.d/system-password 2>/dev/null &&
+   grep -Pq -- "^\h*password\h+[^#\n\r]+\h+pam_pwhistory\.so\h+([^#\n\r]+\h+)?remember=([5-9]|[1-9][0-9]+)\b" /etc/pam.d/system-auth 2>/dev/null; then
+    echo PASS
+else
+    echo "FAIL: pam_pwhistory remember setting is missing or too low"
+fi
+'@
+
+    # ----- 5.5 Accounts --------------------------------------------------------
+    '5.5.1.1' = @'
+if grep -Pq -- "^\h*PASS_MAX_DAYS\h+([1-9][0-9]{0,2})\b" /etc/login.defs 2>/dev/null &&
+   awk -F: '$2~/^[^*!xX\n\r][^\n\r]+/ && ($5=="" || $5>365){exit 1}' /etc/shadow; then
+    echo PASS
+else
+    echo "FAIL: PASS_MAX_DAYS exceeds 365 in login.defs or user shadow entries"
+fi
+'@
+    '5.5.1.2' = @'
+if grep -Pq -- "^\h*PASS_MIN_DAYS\h+([1-9][0-9]*)\b" /etc/login.defs 2>/dev/null &&
+   awk -F: '$2~/^[^*!xX\n\r][^\n\r]+/ && ($4=="" || $4<1){exit 1}' /etc/shadow; then
+    echo PASS
+else
+    echo "FAIL: PASS_MIN_DAYS is less than 1 in login.defs or user shadow entries"
+fi
+'@
+    '5.5.1.3' = @'
+if grep -Pq -- "^\h*PASS_WARN_AGE\h+([7-9]|[1-9][0-9]+)\b" /etc/login.defs 2>/dev/null &&
+   awk -F: '$2~/^[^*!xX\n\r][^\n\r]+/ && ($6=="" || $6<7){exit 1}' /etc/shadow; then
+    echo PASS
+else
+    echo "FAIL: PASS_WARN_AGE is less than 7 in login.defs or user shadow entries"
+fi
+'@
+    '5.5.1.4' = @'
+if useradd -D 2>/dev/null | grep -Pq -- "^INACTIVE=(0|[1-9]|[1-2][0-9]|30)$" &&
+   awk -F: '$2~/^[^*!xX\n\r][^\n\r]+/ && ($7=="" || $7>30){exit 1}' /etc/shadow; then
+    echo PASS
+else
+    echo "FAIL: INACTIVE exceeds 30 in defaults or user shadow entries"
+fi
+'@
+    '5.5.1.5' = @'
+bad=""
+while read -r user; do
+    change=$(chage --list "$user" 2>/dev/null | awk -F: '/^\s*Last password change/ && $2 !~ /never/ {print $2}' | xargs)
+    [ -z "$change" ] && continue
+    if [ "$(date -d "$change" +%s 2>/dev/null)" -gt "$(date +%s)" ]; then
+        bad="$bad $user"
+    fi
+done < <(awk -F: '$2 ~ /^[^*!xX\n\r][^\n\r]+/ {print $1}' /etc/shadow)
+if [ -z "$bad" ]; then echo PASS; else echo "FAIL: last password change in future for:$bad"; fi
+'@
+    '5.5.2' = @'
+uid_min=$(awk '/^\s*UID_MIN/{print $2}' /etc/login.defs 2>/dev/null | head -n1)
+[ -z "$uid_min" ] && uid_min=1000
+valid_shells="^($( awk -F/ '$NF != "nologin" {print}' /etc/shells 2>/dev/null | sed -rn '/^\//{s,/,\\/,g;p}' | paste -s -d"|" - ))$"
+bad_shell=$(awk -v pat="$valid_shells" -v min="$uid_min" -F: '($1!~/(root|sync|shutdown|halt|^\+)/ && $3<min && $(NF) ~ pat) {print $1}' /etc/passwd | xargs)
+bad_lock=$(awk -v pat="$valid_shells" -v min="$uid_min" -F: '($1!~/(root|^\+)/ && $2!~/LK?/ && $3<min && $(NF) ~ pat) {print $1}' /etc/passwd | xargs)
+if [ -z "$bad_shell" ] && [ -z "$bad_lock" ]; then
+    echo PASS
+else
+    echo "FAIL: unlocked or interactive system accounts shell='$bad_shell' lock='$bad_lock'"
+fi
+'@
+    '5.5.3' = @'
+gid=$(grep "^root:" /etc/passwd 2>/dev/null | cut -f4 -d:)
+if [ "$gid" = "0" ]; then echo PASS; else echo "FAIL: root GID is '$gid' expected 0"; fi
+'@
+    '5.5.4' = @'
+if grep -Eiq '^\s*UMASK\s+(0[0-7][2-7]7|[0-7][2-7]7)\b' /etc/login.defs 2>/dev/null &&
+   ! grep -RPiq '(^|^[^#]*)\s*umask\s+([0-7][0-7][01][0-7]\b|[0-7][0-7][0-7][06]\b|[0-7][01][0-7]\b|[0-7][0-7][06]\b|(u=[rwx]{0,3},)?(g=[rwx]{0,3},)?o=[rwx]+\b|(u=[rwx]{1,3},)?g=[^rx]{1,3}(,o=[rwx]{0,3})?\b)' /etc/login.defs /etc/profile /etc/bashrc /etc/profile.d/*.sh 2>/dev/null; then
+    echo PASS
+else
+    echo "FAIL: default umask is not 027 or more restrictive"
+fi
+'@
+
+    # ----- 6.1 Logging ---------------------------------------------------------
+    '6.1.1.1.1' = @'
+enabled=$(systemctl is-enabled systemd-journald.service 2>/dev/null)
+active=$(systemctl is-active systemd-journald.service 2>/dev/null)
+if [ "$enabled" = "static" ] && [ "$active" = "active" ]; then
+    echo PASS
+else
+    echo "FAIL: systemd-journald enabled='$enabled' active='$active'"
+fi
+'@
+    '6.1.1.1.3' = @'
+want=no
+if systemctl is-active rsyslog.service 2>/dev/null | grep -Pqs -- '^active'; then want=yes; fi
+_systemd_option_check /etc/systemd/journald.conf Journal ForwardToSyslog "$want"
+'@
+    '6.1.1.1.4' = @'
+if systemctl is-enabled systemd-journal-remote.socket systemd-journal-remote.service 2>/dev/null | grep -Pq -- '^enabled' ||
+   systemctl is-active systemd-journal-remote.socket systemd-journal-remote.service 2>/dev/null | grep -Pq -- '^active'; then
+    echo "FAIL: systemd-journal-remote socket/service is enabled or active"
+else
+    echo PASS
+fi
+'@
+    '6.1.1.1.5' = '_systemd_option_check /etc/systemd/journald.conf Journal Storage persistent'
+    '6.1.1.1.6' = '_systemd_option_check /etc/systemd/journald.conf Journal Compress yes'
+    '6.1.2.1' = @'
+if ! systemctl list-unit-files rsyslog.service >/dev/null 2>&1; then
+    echo "SKIP: rsyslog is not installed"
+elif systemctl is-active rsyslog.service 2>/dev/null | grep -Pqs -- '^active' &&
+     systemctl is-enabled rsyslog.service 2>/dev/null | grep -Pqs -- '^enabled'; then
+    echo PASS
+elif systemctl is-active rsyslog.service 2>/dev/null | grep -Pqs -- '^inactive|^failed|^unknown'; then
+    echo "SKIP: rsyslog is not being used for logging"
+else
+    echo "FAIL: rsyslog is installed but not enabled and active"
+fi
+'@
+    '6.1.2.2' = @'
+if ! systemctl list-unit-files rsyslog.service >/dev/null 2>&1; then
+    echo "SKIP: rsyslog is not installed"
+elif grep -Psq -- '^\h*\$FileCreateMode\h+0[0246][024]0\b' /etc/rsyslog.conf /etc/rsyslog.d/*.conf 2>/dev/null; then
+    echo PASS
+else
+    echo "FAIL: rsyslog FileCreateMode is not set to 0640 or more restrictive"
+fi
+'@
+    '6.1.2.3' = @'
+if ! systemctl list-unit-files rsyslog.service >/dev/null 2>&1; then
+    echo "SKIP: rsyslog is not installed"
+elif grep -Psiq -- '^\h*module\(load="?imtcp"?\)|^\h*input\(type="?imtcp"?\b|^\h*\$ModLoad\h+imtcp\b|^\h*\$InputTCPServerRun\b' /etc/rsyslog.conf /etc/rsyslog.d/*.conf 2>/dev/null; then
+    echo "FAIL: rsyslog is configured to receive remote TCP logs"
+else
+    echo PASS
+fi
+'@
+    '6.1.3.1' = @'
+a_output2=()
+f_file_test_chk() {
+    a_out2=()
+    maxperm="$( printf '%o' $(( 0777 & ~$perm_mask)) )"
+    [ $(( $l_mode & $perm_mask )) -gt 0 ] && a_out2+=("mode=$l_mode should be $maxperm or more restrictive")
+    [[ ! "$l_user" =~ $l_auser ]] && a_out2+=("owner=$l_user expected ${l_auser//|/ or }")
+    [[ ! "$l_group" =~ $l_agroup ]] && a_out2+=("group=$l_group expected ${l_agroup//|/ or }")
+    [ "${#a_out2[@]}" -gt 0 ] && a_output2+=("$l_fname ${a_out2[*]}")
+}
+while IFS= read -r -d '' l_file; do
+    while IFS=: read -r l_fname l_mode l_user l_group; do
+        if grep -Pq -- '/(apt)\h*$' <<< "$(dirname "$l_fname")"; then
+            perm_mask='0133'; l_auser='root'; l_agroup='(root|adm)'; f_file_test_chk
+        else
+            case "$(basename "$l_fname")" in
+                lastlog|lastlog.*|wtmp|wtmp.*|wtmp-*|btmp|btmp.*|btmp-*|README) perm_mask='0113'; l_auser='root'; l_agroup='(root|utmp)'; f_file_test_chk ;;
+                cloud-init.log*|localmessages*|waagent.log*) perm_mask='0133'; l_auser='(root|syslog)'; l_agroup='(root|adm)'; f_file_test_chk ;;
+                secure|secure.*|auth.log|syslog|messages) perm_mask='0137'; l_auser='(root|syslog)'; l_agroup='(root|adm)'; f_file_test_chk ;;
+                SSSD|sssd) perm_mask='0117'; l_auser='(root|SSSD)'; l_agroup='(root|SSSD)'; f_file_test_chk ;;
+                gdm|gdm3) perm_mask='0117'; l_auser='root'; l_agroup='(root|gdm|gdm3)'; f_file_test_chk ;;
+                *.journal|*.journal~) perm_mask='0137'; l_auser='root'; l_agroup='(root|systemd-journal)'; f_file_test_chk ;;
+                *) perm_mask='0133'; l_auser='(root|syslog)'; l_agroup='(root|adm)'; f_file_test_chk ;;
+            esac
+        fi
+    done < <(stat -Lc '%n:%#a:%U:%G' "$l_file")
+done < <(find -L /var/log -type f -print0 2>/dev/null)
+if [ "${#a_output2[@]}" -le 0 ]; then echo PASS; else echo "FAIL: ${#a_output2[@]} logfile(s) have incorrect permissions/ownership"; fi
+'@
+
+    # ----- 7.1 / 7.2 Remaining filesystem and account checks -------------------
+    '7.1.11' = @'
+bad_files=$(findmnt -Dkerno fstype,target | awk '($1 !~ /^\s*(nfs|proc|smb|vfat|iso9660|efivarfs|selinuxfs)/ && $2 !~ /^(\/run\/user\/|\/tmp|\/var\/tmp)/){print $2}' | while read -r m; do find "$m" -xdev ! -path "/run/user/*" ! -path "/proc/*" ! -path "*/containerd/*" ! -path "*/kubelet/pods/*" ! -path "*/kubelet/plugins/*" ! -path "/sys/*" ! -path "/snap/*" -type f -perm -0002 -print 2>/dev/null; done | wc -l)
+bad_dirs=$(findmnt -Dkerno fstype,target | awk '($1 !~ /^\s*(nfs|proc|smb|vfat|iso9660|efivarfs|selinuxfs)/ && $2 !~ /^(\/run\/user\/|\/tmp|\/var\/tmp)/){print $2}' | while read -r m; do find "$m" -xdev ! -path "/run/user/*" ! -path "/proc/*" ! -path "*/containerd/*" ! -path "*/kubelet/pods/*" ! -path "*/kubelet/plugins/*" ! -path "/sys/*" ! -path "/snap/*" -type d -perm -0002 -print0 2>/dev/null | while IFS= read -r -d '' d; do mode=$(stat -Lc '%#a' "$d"); [ $((mode & 01000)) -eq 0 ] && echo "$d"; done; done | wc -l)
+if [ "$bad_files" -eq 0 ] && [ "$bad_dirs" -eq 0 ]; then echo PASS; else echo "FAIL: world-writable files=$bad_files dirs-without-sticky=$bad_dirs"; fi
+'@
+    '7.1.12' = @'
+nouser=$(findmnt -Dkerno fstype,target | awk '($1 !~ /^\s*(nfs|proc|smb|vfat|iso9660|efivarfs|selinuxfs)/ && $2 !~ /^\/run\/user\//){print $2}' | while read -r m; do find "$m" -xdev ! -path "/run/user/*" ! -path "/proc/*" ! -path "*/containerd/*" ! -path "*/kubelet/pods/*" ! -path "*/kubelet/plugins/*" ! -path "/sys/fs/cgroup/memory/*" ! -path "/var/*/private/*" \( -nouser -o -nogroup \) -print 2>/dev/null; done | wc -l)
+if [ "$nouser" -eq 0 ]; then echo PASS; else echo "FAIL: $nouser unowned or ungrouped files/directories found"; fi
+'@
+    '7.2.1' = @'
+if awk -F: '($2 != "x") {exit 1}' /etc/passwd; then echo PASS; else echo "FAIL: non-shadowed password entry found in /etc/passwd"; fi
+'@
+    '7.2.2' = @'
+if awk -F: '($2 == "") {exit 1}' /etc/shadow; then echo PASS; else echo "FAIL: empty password field found in /etc/shadow"; fi
+'@
+    '7.2.3' = @'
+if awk -F: 'NR==FNR{g[$3]=1;next} !($4 in g){exit 1}' /etc/group /etc/passwd; then echo PASS; else echo "FAIL: a passwd GID does not exist in /etc/group"; fi
+'@
+    '7.2.4' = @'
+if cut -f3 -d: /etc/passwd | sort -n | uniq -d | grep -q .; then echo "FAIL: duplicate UID found"; else echo PASS; fi
+'@
+    '7.2.5' = @'
+if cut -f3 -d: /etc/group | sort -n | uniq -d | grep -q .; then echo "FAIL: duplicate GID found"; else echo PASS; fi
+'@
+    '7.2.6' = @'
+if cut -f1 -d: /etc/passwd | sort | uniq -d | grep -q .; then echo "FAIL: duplicate user name found"; else echo PASS; fi
+'@
+    '7.2.7' = @'
+if cut -f1 -d: /etc/group | sort | uniq -d | grep -q .; then echo "FAIL: duplicate group name found"; else echo PASS; fi
+'@
+    '7.2.8' = @'
+bad=""
+interactive_users=$(_interactive_users)
+while IFS=: read -r user home; do
+    [ -d "$home" ] || { bad="$bad $user(home-missing)"; continue; }
+    read -r owner mode < <(stat -Lc '%U %a' "$home" 2>/dev/null)
+    [ "$owner" = "$user" ] || bad="$bad $user(owner=$owner)"
+    [ $(( (8#$mode) & (8#0027) )) -eq 0 ] || bad="$bad $user(mode=$mode)"
+done <<< "$interactive_users"
+if [ -z "$bad" ]; then echo PASS; else echo "FAIL:$bad"; fi
+'@
+    '7.2.9' = @'
+bad=""
+interactive_users=$(_interactive_users)
+while IFS=: read -r user home; do
+    [ -d "$home" ] || continue
+    group=$(id -gn "$user" 2>/dev/null | xargs)
+    find "$home" -xdev -type f -name ".*" -print0 2>/dev/null | while IFS= read -r -d '' f; do
+        read -r mode owner gowner < <(stat -Lc '%a %U %G' "$f" 2>/dev/null)
+        base=$(basename "$f")
+        case "$base" in
+            .forward|.rhost) echo "$user:$base:forbidden" ;;
+            .netrc)
+                [ $(( (8#$mode) & (8#0177) )) -eq 0 ] && [ "$owner" = "$user" ] && [ "$gowner" = "$group" ] || echo "$user:$base:$mode:$owner:$gowner"
+                ;;
+            .bash_history)
+                [ $(( (8#$mode) & (8#0177) )) -eq 0 ] && [ "$owner" = "$user" ] && [ "$gowner" = "$group" ] || echo "$user:$base:$mode:$owner:$gowner"
+                ;;
+            *)
+                [ $(( (8#$mode) & (8#0133) )) -eq 0 ] && [ "$owner" = "$user" ] && [ "$gowner" = "$group" ] || echo "$user:$base:$mode:$owner:$gowner"
+                ;;
+        esac
+    done
+done <<< "$interactive_users" > /tmp/cis_dotfiles.out
+if [ ! -s /tmp/cis_dotfiles.out ]; then
+    echo PASS
+else
+    echo "FAIL: dot file access issues found"
+fi
+rm -f /tmp/cis_dotfiles.out
+'@
 }
 
 # ===============================================================================
@@ -4450,12 +5083,13 @@ function Invoke-OnNodeAudits {
     }
 
     $script = Build-AuditScript
+    $expectedSections = $Script:CIS_ITEMS.Count
     foreach ($n in $targets) {
         $name = $n.metadata.name
         Write-Host "  Auditing node $name ..." -ForegroundColor Yellow
         Remove-StaleDebugPods -Node $name
         try {
-            $output = Invoke-NodeAudit -NodeName $name -Script $script
+            $output = Invoke-NodeAudit -NodeName $name -Script $script -ExpectedSections $expectedSections
             $perItem = @{}
             $current = $null
             $buf     = New-Object System.Text.StringBuilder
@@ -4470,10 +5104,11 @@ function Invoke-OnNodeAudits {
                 if ($current) { [void]$buf.AppendLine($line) }
             }
             $Script:NodeOutputs[$name] = $perItem
-            Write-Host ("    captured {0} sections from {1}" -f $perItem.Count, $name) -ForegroundColor Gray
+            Write-Host ("    captured {0}/{1} sections from {2}" -f $perItem.Count, $expectedSections, $name) -ForegroundColor Gray
             # Surface diagnostics whenever the on-node harness returned no
-            # section markers, or always when -DiagnoseAudit is supplied.
-            if ($perItem.Count -eq 0 -or $DiagnoseAudit) {
+            # section markers, returned only a partial capture, or always when
+            # -DiagnoseAudit is supplied.
+            if ($perItem.Count -lt $expectedSections -or $DiagnoseAudit) {
                 Write-Host "    --- raw kubectl debug output (first 60 lines) ---" -ForegroundColor Magenta
                 $rawLines = $output -split "`r?`n"
                 $rawLines | Select-Object -First 60 | ForEach-Object {
@@ -4490,8 +5125,14 @@ function Invoke-OnNodeAudits {
                     Write-Host ("    full raw output saved to: {0}" -f $rawPath) -ForegroundColor Gray
                 } catch { }
             }
-            Add-Result "PRE-DEBUG-$name" "kubectl debug node/$name" "PASS" ("captured {0} sections" -f $perItem.Count)
-            $Script:PassCount++
+            if ($perItem.Count -eq $expectedSections) {
+                Add-Result "PRE-DEBUG-$name" "kubectl debug node/$name" "PASS" ("captured {0}/{1} sections" -f $perItem.Count, $expectedSections)
+                $Script:PassCount++
+            } else {
+                Write-Host ("    [WARN] incomplete node audit capture on {0}; automated items may fall back to MANL." -f $name) -ForegroundColor Magenta
+                Add-Result "PRE-DEBUG-$name" "kubectl debug node/$name" "WARN" ("captured {0}/{1} sections; see raw output for diagnostics" -f $perItem.Count, $expectedSections)
+                $Script:WarnCount++
+            }
         } catch {
             Write-Host "    [WARN] debug pod failed on $name : $($_.Exception.Message)" -ForegroundColor Magenta
             Add-Result "PRE-DEBUG-$name" "kubectl debug node/$name" "WARN" $_.Exception.Message
