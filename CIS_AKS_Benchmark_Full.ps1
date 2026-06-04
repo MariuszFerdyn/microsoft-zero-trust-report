@@ -98,7 +98,7 @@ param(
     [switch]$RunOnNodes,
     [switch]$SkipOnNodeAudit,
     [switch]$DiagnoseAudit,
-    [string]$DebugImage = "mcr.microsoft.com/cbl-mariner/base/core:3.0",
+    [string]$DebugImage = "mcr.microsoft.com/cbl-mariner/base/core:2.0",
     [string]$OutputPath = "$PSScriptRoot\CIS_AKS_Results_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 )
 
@@ -310,6 +310,23 @@ function Invoke-NodeAudit {
         Start-Sleep -Seconds $tickSec
         $elapsed += $tickSec
         Write-Host ("    ... waiting on kubectl debug ({0}s elapsed)" -f $elapsed) -ForegroundColor DarkGray
+        # Surface live debug-pod status so the operator can see WHY it's
+        # stuck (ImagePullBackOff / ErrImagePull / Pending / etc.).
+        try {
+            $podLine = & kubectl get pods --all-namespaces `
+                --field-selector "spec.nodeName=$NodeName" `
+                -o "jsonpath={range .items[?(@.metadata.generateName=='node-debugger-${NodeName}-')]}{.metadata.namespace}/{.metadata.name}\t{.status.phase}\t{range .status.containerStatuses[*]}{.state}{end}{`"\n`"}{end}" 2>$null
+            if ($podLine) {
+                foreach ($l in ($podLine -split "`r?`n" | Where-Object { $_ })) {
+                    Write-Host ("      pod-status: " + $l) -ForegroundColor DarkYellow
+                }
+            } else {
+                # Fallback: any pod on this node whose name contains 'debugger'
+                $any = & kubectl get pods --all-namespaces --field-selector "spec.nodeName=$NodeName" -o "jsonpath={range .items[*]}{.metadata.name}\t{.status.phase}\t{range .status.containerStatuses[*]}{.state.waiting.reason}{.state.waiting.message}{end}{`"\n`"}{end}" 2>$null
+                $debug = ($any -split "`r?`n") | Where-Object { $_ -match 'debugger' }
+                foreach ($l in $debug) { Write-Host ("      pod-status: " + $l) -ForegroundColor DarkYellow }
+            }
+        } catch { }
         if ($elapsed -ge $timeoutSec) {
             Write-Host ("    [WARN] kubectl debug exceeded {0}s, killing process {1}" -f $timeoutSec, $proc.Id) -ForegroundColor Magenta
             try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
