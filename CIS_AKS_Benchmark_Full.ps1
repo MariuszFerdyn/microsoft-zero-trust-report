@@ -284,36 +284,45 @@ function Invoke-NodeAudit {
     # if the image pull is slow or the pod won't schedule, we want feedback
     # rather than an indefinite hang.
     $img = $DebugImage
-    $job = Start-Job -ScriptBlock {
-        param($node, $image, $cmd)
-        # < NUL ensures kubectl doesn't block waiting on stdin.
-        $env:KUBECTL_DEBUG_ATTACH = "1"
-        $out = & kubectl debug "node/$node" --image=$image --image-pull-policy=IfNotPresent --attach=true --quiet=true -- /bin/bash -c $cmd 2>&1 < $null
-        return ($out | Out-String)
-    } -ArgumentList $NodeName, $img, $podCmd
+    # Persist podCmd to a temp file and have kubectl read it as args via a
+    # batch wrapper.  Avoids passing a 20KB+ argument through Start-Job
+    # serialization and avoids any stdin-blocking on PowerShell's side.
+    $tmpOut = [System.IO.Path]::GetTempFileName()
+    $tmpErr = [System.IO.Path]::GetTempFileName()
+    $proc = Start-Process -FilePath "kubectl" `
+        -ArgumentList @(
+            "debug", "node/$NodeName",
+            "--image=$img",
+            "--image-pull-policy=IfNotPresent",
+            "--attach=true",
+            "--quiet=true",
+            "--",
+            "/bin/bash", "-c", $podCmd
+        ) `
+        -NoNewWindow -PassThru `
+        -RedirectStandardOutput $tmpOut `
+        -RedirectStandardError  $tmpErr
 
     $timeoutSec = 600
     $elapsed    = 0
     $tickSec    = 15
-    while (-not $job.HasMoreData -or $job.State -eq 'Running') {
-        if ($job.State -ne 'Running') { break }
+    while (-not $proc.HasExited) {
         Start-Sleep -Seconds $tickSec
         $elapsed += $tickSec
         Write-Host ("    ... waiting on kubectl debug ({0}s elapsed)" -f $elapsed) -ForegroundColor DarkGray
         if ($elapsed -ge $timeoutSec) {
-            Write-Host ("    [WARN] kubectl debug exceeded {0}s, stopping job" -f $timeoutSec) -ForegroundColor Magenta
-            Stop-Job $job -ErrorAction SilentlyContinue
+            Write-Host ("    [WARN] kubectl debug exceeded {0}s, killing process {1}" -f $timeoutSec, $proc.Id) -ForegroundColor Magenta
+            try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
             break
         }
     }
-    try {
-        $output = Receive-Job $job -ErrorAction SilentlyContinue
-    } catch {
-        $output = "ERROR: $($_.Exception.Message)"
-    }
-    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    $stdout = ""; $stderr = ""
+    try { $stdout = Get-Content $tmpOut -Raw -ErrorAction SilentlyContinue } catch { }
+    try { $stderr = Get-Content $tmpErr -Raw -ErrorAction SilentlyContinue } catch { }
+    Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue
+    $output = ($stdout + "`n" + $stderr).Trim()
     if (-not $output) { $output = "ERROR: kubectl debug returned no output (timed out or pod failed to start)" }
-    return ($output | Out-String).Trim()
+    return $output
 }
 
 function Build-AuditScript {
