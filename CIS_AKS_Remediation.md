@@ -509,7 +509,7 @@ spec:
       - operator: Exists
       containers:
       - name: remediate
-        image: mcr.microsoft.com/azurelinux/base/core:3.0
+        image: ubuntu:24.04
         imagePullPolicy: IfNotPresent
         securityContext:
           privileged: true
