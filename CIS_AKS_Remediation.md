@@ -280,16 +280,40 @@ fix_login_defs_sha512() {
   ensure_login_defs ENCRYPT_METHOD SHA512
 }
 
-fix_pam_file() {
-  pamfile="$1"
 
-  log "Fixing PAM file: $pamfile"
+fix_pam() {
+  log "Fixing PAM password policy with exact CIS 5.4.x content"
 
-  mkdir -p "$(dirname "$pamfile")"
+  mkdir -p /host/etc/security
+  mkdir -p /host/etc/pam.d
 
-  if [ ! -f "$pamfile" ]; then
-    log "$pamfile does not exist; creating minimal CIS-aligned file"
-    cat > "$pamfile" <<'EOF'
+  backup_once /host/etc/security/pwquality.conf
+  backup_once /host/etc/security/faillock.conf
+  backup_once /host/etc/security/opasswd
+  backup_once /host/etc/pam.d/system-auth
+  backup_once /host/etc/pam.d/system-password
+  backup_once /host/etc/login.defs
+
+  cat > /host/etc/security/pwquality.conf <<'EOF'
+minlen = 14
+minclass = 4
+dcredit = -1
+ucredit = -1
+ocredit = -1
+lcredit = -1
+EOF
+
+  cat > /host/etc/security/faillock.conf <<'EOF'
+deny = 5
+unlock_time = 900
+fail_interval = 900
+EOF
+
+  touch /host/etc/security/opasswd
+  chown 0:0 /host/etc/security/opasswd
+  chmod 0600 /host/etc/security/opasswd
+
+  cat > /tmp/cis-system-pam <<'EOF'
 auth required pam_env.so
 auth required pam_faillock.so preauth silent audit deny=5 unlock_time=900
 auth sufficient pam_unix.so nullok try_first_pass
@@ -299,137 +323,29 @@ auth required pam_deny.so
 account required pam_faillock.so
 account required pam_unix.so
 password requisite pam_pwquality.so retry=3
-password requisite pam_pwhistory.so use_authtok remember=5 retry=3
+password requisite pam_pwhistory.so remember=5 use_authtok retry=3
 password sufficient pam_unix.so sha512 shadow try_first_pass use_authtok
 password required pam_deny.so
 EOF
-    chmod 0644 "$pamfile"
-    return
-  fi
 
-  backup_once "$pamfile"
+  cp /tmp/cis-system-pam /host/etc/pam.d/system-auth
+  cp /tmp/cis-system-pam /host/etc/pam.d/system-password
 
-  sed -i '/pam_faillock\.so/d' "$pamfile"
-  sed -i '/pam_pwhistory\.so/d' "$pamfile"
+  chown 0:0 /host/etc/security/pwquality.conf
+  chown 0:0 /host/etc/security/faillock.conf
+  chown 0:0 /host/etc/pam.d/system-auth
+  chown 0:0 /host/etc/pam.d/system-password
 
-  if grep -qE '^[[:space:]]*password[[:space:]].*pam_pwquality\.so' "$pamfile"; then
-    sed -i -E '/^[[:space:]]*password[[:space:]].*pam_pwquality\.so/ {
-      s/[[:space:]]retry=[0-9]+//g
-      s/[[:space:]]*$/ retry=3/
-    }' "$pamfile"
+  chmod 0644 /host/etc/security/pwquality.conf
+  chmod 0644 /host/etc/security/faillock.conf
+  chmod 0644 /host/etc/pam.d/system-auth
+  chmod 0644 /host/etc/pam.d/system-password
+
+  touch /host/etc/login.defs
+  if grep -qE '^[[:space:]]*ENCRYPT_METHOD[[:space:]]+' /host/etc/login.defs; then
+    sed -i 's/^[[:space:]]*ENCRYPT_METHOD[[:space:]].*/ENCRYPT_METHOD SHA512/' /host/etc/login.defs
   else
-    if grep -qE '^[[:space:]]*password[[:space:]].*pam_unix\.so' "$pamfile"; then
-      sed -i '/^[[:space:]]*password[[:space:]].*pam_unix\.so/i password requisite pam_pwquality.so retry=3' "$pamfile"
-    else
-      echo 'password requisite pam_pwquality.so retry=3' >> "$pamfile"
-    fi
-  fi
-
-  if grep -qE '^[[:space:]]*password[[:space:]].*pam_unix\.so' "$pamfile"; then
-    sed -i -E '/^[[:space:]]*password[[:space:]].*pam_unix\.so/ {
-      s/[[:space:]]md5\b//g
-      s/[[:space:]]yescrypt\b//g
-      s/[[:space:]]bigcrypt\b//g
-      s/[[:space:]]blowfish\b//g
-      /[[:space:]]sha512\b/! s/$/ sha512/
-    }' "$pamfile"
-  else
-    echo 'password sufficient pam_unix.so sha512 shadow try_first_pass use_authtok' >> "$pamfile"
-  fi
-
-  awk '
-    {
-      print
-      if (!done && $1 == "password" && $0 ~ /pam_pwquality\.so/) {
-        print "password requisite pam_pwhistory.so use_authtok remember=5 retry=3"
-        done=1
-      }
-    }
-    END {
-      if (!done) {
-        print "password requisite pam_pwhistory.so use_authtok remember=5 retry=3"
-      }
-    }
-  ' "$pamfile" > "${pamfile}.tmp"
-  cat "${pamfile}.tmp" > "$pamfile"
-  rm -f "${pamfile}.tmp"
-
-  awk '
-    BEGIN {
-      preauth_done=0
-      authfail_done=0
-      account_done=0
-    }
-
-    {
-      if (!preauth_done && $1 == "auth" && $0 ~ /pam_env\.so/) {
-        print
-        print "auth required pam_faillock.so preauth silent audit deny=5 unlock_time=900"
-        preauth_done=1
-        next
-      }
-
-      if (!preauth_done && $1 == "auth" && $0 !~ /pam_env\.so/) {
-        print "auth required pam_faillock.so preauth silent audit deny=5 unlock_time=900"
-        preauth_done=1
-      }
-
-      if (!authfail_done && $1 == "auth" && ($0 ~ /pam_succeed_if\.so/ || $0 ~ /pam_deny\.so/)) {
-        print "auth [default=die] pam_faillock.so authfail audit deny=5 unlock_time=900"
-        authfail_done=1
-      }
-
-      if (!account_done && $1 == "account") {
-        print "account required pam_faillock.so"
-        account_done=1
-      }
-
-      print
-    }
-
-    END {
-      if (!preauth_done) {
-        print "auth required pam_faillock.so preauth silent audit deny=5 unlock_time=900"
-      }
-      if (!authfail_done) {
-        print "auth [default=die] pam_faillock.so authfail audit deny=5 unlock_time=900"
-      }
-      if (!account_done) {
-        print "account required pam_faillock.so"
-      }
-    }
-  ' "$pamfile" > "${pamfile}.tmp"
-  cat "${pamfile}.tmp" > "$pamfile"
-  rm -f "${pamfile}.tmp"
-
-  chmod 0644 "$pamfile"
-}
-
-fix_pam() {
-  log "Fixing PAM password policy"
-
-  mkdir -p /host/etc/pam.d
-
-  if [ -f /host/etc/pam.d/system-auth ] || [ -f /host/etc/pam.d/system-password ]; then
-    fix_pam_file /host/etc/pam.d/system-auth
-    fix_pam_file /host/etc/pam.d/system-password
-  fi
-
-  if [ -f /host/etc/pam.d/common-password ]; then
-    backup_once /host/etc/pam.d/common-password
-    if grep -qE 'pam_pwquality\.so' /host/etc/pam.d/common-password; then
-      sed -i -E '/pam_pwquality\.so/ {
-        s/[[:space:]]retry=[0-9]+//g
-        s/[[:space:]]*$/ retry=3/
-      }' /host/etc/pam.d/common-password
-    fi
-    if grep -qE 'pam_unix\.so' /host/etc/pam.d/common-password; then
-      sed -i -E '/pam_unix\.so/ {
-        s/[[:space:]]yescrypt\b//g
-        s/[[:space:]]md5\b//g
-        /[[:space:]]sha512\b/! s/$/ sha512/
-      }' /host/etc/pam.d/common-password
-    fi
+    echo 'ENCRYPT_METHOD SHA512' >> /host/etc/login.defs
   fi
 }
 
@@ -543,7 +459,6 @@ kubectl -n "${NAMESPACE}" rollout status daemonset/"${APP_NAME}"
 
 echo "[INFO] Remediation DaemonSet deployed"
 kubectl -n "${NAMESPACE}" get pods -l app="${APP_NAME}" -o wide
-
 ```
 
 ## What the script creates
