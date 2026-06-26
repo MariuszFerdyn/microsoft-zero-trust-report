@@ -82,8 +82,8 @@ Automated scripts to audit your **Microsoft Azure**, **Microsoft 365**, and **Po
 
 ### Prerequisites
 
-- **Azure CLI (`az`)** — required by `CIS_Azure_Permissions.ps1` to create the App Registration,
-  Service Principal, RBAC role assignments, and Graph permission grants.
+- **Azure CLI (`az`)** — required by `CIS_Azure_Permissions.ps1` and `CIS_Azure_Benchmark_Full.ps1`
+  to create the App Registration, Service Principal, RBAC role assignments, and Graph permission grants.
   Install from <https://learn.microsoft.com/cli/azure/install-azure-cli> (or `winget install Microsoft.AzureCLI`),
   then sign in with `az login --tenant <tenant-guid>`.
 
